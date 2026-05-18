@@ -60,13 +60,8 @@ function isSupabaseFunctionRequest(request: Request): boolean {
 function getTokenFromPath(pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
 
-  if (parts.length === 0) {
-    return "";
-  }
-
-  if (parts[0] === "api") {
-    return "";
-  }
+  if (parts.length === 0) return "";
+  if (parts[0] === "api") return "";
 
   return parts[0];
 }
@@ -80,23 +75,22 @@ function rewriteUrlString(
   const normalizedUrl = new URL(normalizedRequest.url);
   const token = getTokenFromPath(normalizedUrl.pathname);
 
-  if (!token) {
-    return value;
-  }
+  if (!token) return value;
 
   try {
     const target = new URL(value);
 
-    // 只改当前 Supabase host 生成出来的 URL，避免误伤外部视频/图片地址
+    // 只改当前 Supabase host 下由 worker 生成的内部 API URL
     if (target.hostname !== originalUrl.hostname) {
       return value;
     }
 
-    // worker 生成的是 /{TOKEN}/api/v2/comment/...
-    // Supabase 外部真实路径需要 /functions/v1/danmu/{TOKEN}/api/v2/comment/...
     const tokenPrefix = `/${token}`;
 
-    if (target.pathname === tokenPrefix || target.pathname.startsWith(tokenPrefix + "/")) {
+    if (
+      target.pathname === tokenPrefix ||
+      target.pathname.startsWith(tokenPrefix + "/")
+    ) {
       target.protocol = "https:";
       target.pathname = `/functions/v1/danmu${target.pathname}`;
       return target.toString();
@@ -114,14 +108,23 @@ function rewriteJsonUrls(
   normalizedRequest: Request,
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => rewriteJsonUrls(item, originalRequest, normalizedRequest));
+    return value.map((item) =>
+      rewriteJsonUrls(item, originalRequest, normalizedRequest)
+    );
   }
 
   if (value && typeof value === "object") {
     const result: Record<string, unknown> = {};
 
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (typeof item === "string" && (key === "url" || item.startsWith("http://") || item.startsWith("https://"))) {
+      if (
+        typeof item === "string" &&
+        (
+          key === "url" ||
+          item.startsWith("http://") ||
+          item.startsWith("https://")
+        )
+      ) {
         result[key] = rewriteUrlString(item, originalRequest, normalizedRequest);
       } else {
         result[key] = rewriteJsonUrls(item, originalRequest, normalizedRequest);
@@ -143,26 +146,22 @@ async function rewriteSupabaseResponseUrls(
     return response;
   }
 
-  const contentType = response.headers.get("content-type") || "";
-
-  // FongMi 返回是 JSON。这里仅处理 JSON，XML 弹幕不动。
-  if (!contentType.includes("json")) {
-    return response;
-  }
-
   const text = await response.clone().text();
+  const trimmed = text.trim();
 
-  if (!text.trim().startsWith("{") && !text.trim().startsWith("[")) {
+  // 不依赖 content-type，只要像 JSON 就尝试处理
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
     return response;
   }
 
   try {
     const data = JSON.parse(text);
     const rewritten = rewriteJsonUrls(data, originalRequest, normalizedRequest);
-    const headers = new Headers(response.headers);
 
+    const headers = new Headers(response.headers);
     headers.delete("content-length");
     headers.set("content-type", "application/json; charset=utf-8");
+    headers.set("access-control-allow-origin", "*");
 
     return new Response(JSON.stringify(rewritten), {
       status: response.status,
