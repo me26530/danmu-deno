@@ -23,7 +23,7 @@ jobs:
 
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+      SUPABASE_PROJECT_IDS: ${{ secrets.SUPABASE_PROJECT_IDS }}
 
     steps:
       - name: Checkout
@@ -37,5 +37,11 @@ jobs:
       - name: Show Supabase CLI version
         run: supabase --version
 
-      - name: Deploy danmu function
-        run: supabase functions deploy danmu --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
+      - name: Deploy danmu function to all projects
+        run: |
+          for project_ref in $SUPABASE_PROJECT_IDS; do
+            echo "Deploying danmu function to $project_ref"
+            supabase functions deploy danmu \
+              --project-ref "$project_ref" \
+              --no-verify-jwt
+          done
