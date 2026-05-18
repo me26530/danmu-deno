@@ -2,7 +2,7 @@
   "tasks": {
     "start": "deno run --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
     "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
-    "check": "deno check main.ts"
+    "check": "deno check main.ts supabase/functions/danmu/index.ts runtime/deno-worker.ts"
   },
   "nodeModulesDir": "auto"
 }

@@ -1,0 +1,4 @@
+project_id = "danmu-deno"
+
+[functions.danmu]
+verify_jwt = false
