@@ -1,0 +1,41 @@
+name: Deploy Supabase Edge Function
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "supabase/**"
+      - "runtime/**"
+      - "danmu_api/**"
+      - "config/**"
+      - "deno.json"
+      - "deno.lock"
+      - "package.json"
+      - ".github/workflows/deploy-supabase.yml"
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Show Supabase CLI version
+        run: supabase --version
+
+      - name: Deploy danmu function
+        run: supabase functions deploy danmu --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
