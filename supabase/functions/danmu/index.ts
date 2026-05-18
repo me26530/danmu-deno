@@ -36,17 +36,16 @@ function rewriteRequestForDanmu(req: Request): Request {
       .replace(/^\/functions\/v1\/danmu(?=\/|$)/, "")
       .replace(/^\/danmu(?=\/|$)/, "") || "/";
 
-  // 兼容播放器手动搜索可能使用的不同路径
-  if (
-    url.pathname.includes("/api/v2/search/episodes") ||
-    url.pathname.match(/\/api\/v2\/search\/?$/)
-  ) {
-    url.pathname = url.pathname
-      .replace("/api/v2/search/episodes", "/api/v2/search/anime")
-      .replace(/\/api\/v2\/search\/?$/, "/api/v2/search/anime");
+  // 兼容播放器手动搜索可能使用的 /api/v2/search 简写
+  // 注意：不要把 /api/v2/search/episodes 改成 /api/v2/search/anime
+  if (url.pathname.match(/\/api\/v2\/search\/?$/)) {
+    url.pathname = url.pathname.replace(
+      /\/api\/v2\/search\/?$/,
+      "/api/v2/search/anime",
+    );
   }
 
-  // 兼容不同播放器的搜索参数名
+  // 兼容不同播放器的搜索参数名：search/anime
   if (url.pathname.includes("/api/v2/search/anime")) {
     const keyword =
       url.searchParams.get("keyword") ||
@@ -58,6 +57,21 @@ function rewriteRequestForDanmu(req: Request): Request {
 
     if (keyword && !url.searchParams.get("keyword")) {
       url.searchParams.set("keyword", keyword);
+    }
+  }
+
+  // 兼容不同播放器的剧集搜索参数名：search/episodes
+  if (url.pathname.includes("/api/v2/search/episodes")) {
+    const anime =
+      url.searchParams.get("anime") ||
+      url.searchParams.get("keyword") ||
+      url.searchParams.get("q") ||
+      url.searchParams.get("query") ||
+      url.searchParams.get("title") ||
+      url.searchParams.get("name");
+
+    if (anime && !url.searchParams.get("anime")) {
+      url.searchParams.set("anime", anime);
     }
   }
 
@@ -85,7 +99,7 @@ function rewriteRequestForDanmu(req: Request): Request {
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
 
-  // 健康检查，不进入业务逻辑
+  // 健康检查
   if (url.pathname.endsWith("/__health")) {
     return new Response(
       JSON.stringify({
