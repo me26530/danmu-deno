@@ -34,12 +34,27 @@ export function createCtx() {
   };
 }
 
+function normalizeRequestForRuntime(request: Request): Request {
+  const url = new URL(request.url);
+
+  url.pathname = url.pathname
+    .replace(/^\/functions\/v1\/danmu(?=\/|$)/, "")
+    .replace(/^\/danmu(?=\/|$)/, "");
+
+  if (!url.pathname) {
+    url.pathname = "/";
+  }
+
+  return new Request(url.toString(), request);
+}
+
 export async function handleDenoRequest(request: Request): Promise<Response> {
   const env = getEnv();
   const ctx = createCtx();
+  const normalizedRequest = normalizeRequestForRuntime(request);
 
   try {
-    return await worker.fetch(request, env, ctx);
+    return await worker.fetch(normalizedRequest, env, ctx);
   } catch (error) {
     console.error("[worker.fetch error]", error);
 
