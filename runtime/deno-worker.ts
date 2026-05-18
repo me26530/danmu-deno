@@ -53,6 +53,34 @@ export async function handleDenoRequest(request: Request): Promise<Response> {
   const ctx = createCtx();
   const normalizedRequest = normalizeRequestForRuntime(request);
 
+  const originalUrl = new URL(request.url);
+  const normalizedUrl = new URL(normalizedRequest.url);
+
+  if (originalUrl.searchParams.get("__debug") === "1") {
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          originalPathname: originalUrl.pathname,
+          normalizedPathname: normalizedUrl.pathname,
+          originalSearch: originalUrl.search,
+          normalizedSearch: normalizedUrl.search,
+          tokenExists: !!env.TOKEN,
+          tokenLength: env.TOKEN?.length ?? 0,
+          adminTokenExists: !!env.ADMIN_TOKEN,
+        },
+        null,
+        2,
+      ),
+      {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "access-control-allow-origin": "*",
+        },
+      },
+    );
+  }
+
   try {
     return await worker.fetch(normalizedRequest, env, ctx);
   } catch (error) {
@@ -67,6 +95,7 @@ export async function handleDenoRequest(request: Request): Promise<Response> {
         status: 500,
         headers: {
           "content-type": "application/json; charset=utf-8",
+          "access-control-allow-origin": "*",
         },
       },
     );
