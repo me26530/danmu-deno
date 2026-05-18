@@ -34,12 +34,30 @@ export function createCtx() {
   };
 }
 
+function normalizeRequestForRuntime(request: Request): Request {
+  const url = new URL(request.url);
+
+  // Supabase Edge Function 线上路径：
+  // /functions/v1/danmu/1105074071/api/v2/...
+  //
+  // danmu_api/worker.js 期望路径：
+  // /1105074071/api/v2/...
+  url.pathname = url.pathname.replace(/^\/functions\/v1\/danmu(?=\/|$)/, "");
+
+  if (!url.pathname) {
+    url.pathname = "/";
+  }
+
+  return new Request(url.toString(), request);
+}
+
 export async function handleDenoRequest(request: Request): Promise<Response> {
   const env = getEnv();
   const ctx = createCtx();
+  const normalizedRequest = normalizeRequestForRuntime(request);
 
   try {
-    return await worker.fetch(request, env, ctx);
+    return await worker.fetch(normalizedRequest, env, ctx);
   } catch (error) {
     console.error("[worker.fetch error]", error);
 
