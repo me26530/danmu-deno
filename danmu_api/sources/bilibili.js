@@ -40,7 +40,7 @@ export default class BilibiliSource extends BaseSource {
       const timeout = parseInt(globals.vodRequestTimeout || '5000', 10) || 5000;
       const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), timeout);
-      const fetchFn = typeof fetch === 'function' ? fetch : (await import('node-fetch')).default;
+      const fetchFn = typeof fetch === 'function' ? fetch : (await import('node' + '-fetch')).default;
       const response = await fetchFn(shortUrl, {
         method: 'GET',
         headers: {

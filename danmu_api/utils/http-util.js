@@ -52,7 +52,7 @@ export async function httpGet(url, options = {}) {
       let response;
       if (typeof WebAssembly === 'undefined') {
         log("info", "iOS环境降级使用node-fetch");
-        const fetch = (await import('node-fetch')).default;
+        const fetch = (await import('node' + '-fetch')).default;
         response = await fetch(url, {
           method: 'GET',
           headers: {
@@ -260,7 +260,7 @@ export async function httpPost(url, body, options = {}) {
       let response;
       if (typeof WebAssembly === 'undefined') {
         log("info", "iOS环境降级使用node-fetch");
-        const fetch = (await import('node-fetch')).default;
+        const fetch = (await import('node' + '-fetch')).default;
         response = await fetch(url, fetchOptions);
       } else {
         // 现代浏览器环境
