@@ -1,10 +1,8 @@
 {
   "tasks": {
-    "start": "deno run --allow-net --allow-env --allow-read main.ts"
+    "start": "deno run --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
+    "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
+    "check": "deno check main.ts"
   },
-  "nodeModulesDir": "auto",
-  "compilerOptions": {
-    "allowJs": true,
-    "checkJs": false
-  }
+  "nodeModulesDir": "auto"
 }
