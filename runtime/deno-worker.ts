@@ -35,14 +35,24 @@ export function createCtx() {
 }
 
 function normalizeRequestForRuntime(request: Request): Request {
-  const url = new URL(request.url);
+  const originalUrl = new URL(request.url);
+  const normalizedUrl = new URL(request.url);
 
-  url.pathname = url.pathname
+  normalizedUrl.pathname = normalizedUrl.pathname
     .replace(/^\/functions\/v1\/danmu(?=\/|$)/, "")
     .replace(/^\/danmu(?=\/|$)/, "");
 
-  if (!url.pathname) {
-    url.pathname = "/";
+  if (!normalizedUrl.pathname) {
+    normalizedUrl.pathname = "/";
+  }
+
+  // EdgeOne / 普通 Deno 路径没变化时直接返回原始 request，
+  // 避免 POST body 在重建 Request 时丢失。
+  if (
+    normalizedUrl.pathname === originalUrl.pathname &&
+    normalizedUrl.search === originalUrl.search
+  ) {
+    return request;
   }
 
   const init: RequestInit = {
@@ -51,13 +61,11 @@ function normalizeRequestForRuntime(request: Request): Request {
     redirect: request.redirect,
   };
 
-  // GET / HEAD 不能带 body；POST/PUT 等必须显式保留 body，
-  // 否则 EdgeOne / Supabase 等运行时可能出现 Invalid JSON body。
   if (request.method !== "GET" && request.method !== "HEAD") {
     init.body = request.body;
   }
 
-  return new Request(url.toString(), init);
+  return new Request(normalizedUrl.toString(), init);
 }
 
 function isSupabaseHost(hostname: string): boolean {
@@ -67,13 +75,8 @@ function isSupabaseHost(hostname: string): boolean {
 function getTokenFromPath(pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
 
-  if (parts.length === 0) {
-    return "";
-  }
-
-  if (parts[0] === "api") {
-    return "";
-  }
+  if (parts.length === 0) return "";
+  if (parts[0] === "api") return "";
 
   return parts[0];
 }
@@ -85,29 +88,21 @@ function rewriteUrlString(
 ): string {
   const originalUrl = new URL(originalRequest.url);
   const normalizedUrl = new URL(normalizedRequest.url);
-
-  // token 以 normalized path 为准：
-  // /1105074071/api/v2/...
   const token = getTokenFromPath(normalizedUrl.pathname);
 
-  if (!token) {
-    return value;
-  }
+  if (!token) return value;
 
   try {
     const target = new URL(value);
 
-    // 只处理当前 Supabase host 生成的内部 API URL，不碰外部视频/图片地址
     if (target.hostname !== originalUrl.hostname) {
       return value;
     }
 
-    // 只在 Supabase host 下重写，避免影响普通 Deno 本地运行
     if (!isSupabaseHost(originalUrl.hostname)) {
       return value;
     }
 
-    // 已经是正确 Supabase Function 路径就不重复处理
     if (target.pathname.startsWith("/functions/v1/danmu/")) {
       target.protocol = "https:";
       return target.toString();
@@ -115,11 +110,6 @@ function rewriteUrlString(
 
     const tokenPrefix = `/${token}`;
 
-    // worker 生成的是：
-    // /1105074071/api/v2/comment/...
-    //
-    // Supabase 外部需要：
-    // /functions/v1/danmu/1105074071/api/v2/comment/...
     if (
       target.pathname === tokenPrefix ||
       target.pathname.startsWith(tokenPrefix + "/")
@@ -177,7 +167,6 @@ async function rewriteSupabaseResponseUrls(
 ): Promise<Response> {
   const originalUrl = new URL(originalRequest.url);
 
-  // 只在 Supabase host 下尝试重写
   if (!isSupabaseHost(originalUrl.hostname)) {
     return response;
   }
@@ -185,7 +174,6 @@ async function rewriteSupabaseResponseUrls(
   const text = await response.clone().text();
   const trimmed = text.trim();
 
-  // 不依赖 content-type；只要 body 像 JSON，就尝试处理
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
     return response;
   }
@@ -218,6 +206,8 @@ export async function handleDenoRequest(request: Request): Promise<Response> {
   const normalizedUrl = new URL(normalizedRequest.url);
 
   if (originalUrl.searchParams.get("__debug") === "1") {
+    const tokenFromPath = getTokenFromPath(normalizedUrl.pathname);
+
     return new Response(
       JSON.stringify(
         {
@@ -226,9 +216,13 @@ export async function handleDenoRequest(request: Request): Promise<Response> {
           normalizedPathname: normalizedUrl.pathname,
           originalHost: originalUrl.hostname,
           isSupabaseHost: isSupabaseHost(originalUrl.hostname),
-          tokenFromNormalizedPath: getTokenFromPath(normalizedUrl.pathname),
+          tokenFromNormalizedPath: tokenFromPath,
           tokenExists: !!env.TOKEN,
           tokenLength: env.TOKEN?.length ?? 0,
+          tokenMatchesPath: env.TOKEN === tokenFromPath,
+          tokenPreview: env.TOKEN
+            ? env.TOKEN.slice(0, 2) + "***" + env.TOKEN.slice(-2)
+            : "",
           adminTokenExists: !!env.ADMIN_TOKEN,
         },
         null,
