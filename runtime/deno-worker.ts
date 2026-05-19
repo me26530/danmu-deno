@@ -45,7 +45,19 @@ function normalizeRequestForRuntime(request: Request): Request {
     url.pathname = "/";
   }
 
-  return new Request(url.toString(), request);
+  const init: RequestInit = {
+    method: request.method,
+    headers: request.headers,
+    redirect: request.redirect,
+  };
+
+  // GET / HEAD 不能带 body；POST/PUT 等必须显式保留 body，
+  // 否则 EdgeOne / Supabase 等运行时可能出现 Invalid JSON body。
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    init.body = request.body;
+  }
+
+  return new Request(url.toString(), init);
 }
 
 function isSupabaseHost(hostname: string): boolean {
