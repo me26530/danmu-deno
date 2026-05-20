@@ -48,8 +48,17 @@ jobs:
           rm -rf supabase/functions/danmu/danmu_api
           cp -r danmu_api supabase/functions/danmu/danmu_api
 
+          if [ -d config ]; then
+            rm -rf supabase/functions/danmu/config
+            cp -r config supabase/functions/danmu/config
+          fi
+
+          echo "Checking required files..."
+          test -f supabase/functions/danmu/runtime/deno-worker.ts
+          test -f supabase/functions/danmu/danmu_api/worker.js
+
           echo "Prepared file structure:"
-          find supabase/functions/danmu -maxdepth 3 -type f | sort
+          find supabase/functions/danmu -maxdepth 4 -type f | sort
 
       - name: Deploy danmu function to all projects
         run: |
@@ -57,5 +66,6 @@ jobs:
             echo "Deploying danmu function to $project_ref"
             supabase functions deploy danmu \
               --project-ref "$project_ref" \
-              --no-verify-jwt
+              --no-verify-jwt \
+              --debug
           done
