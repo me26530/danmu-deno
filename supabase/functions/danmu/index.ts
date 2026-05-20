@@ -1,5 +1,4 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { handleDenoRequest } from "./runtime/deno-worker.ts";
 
 function corsHeaders(): HeadersInit {
   return {
@@ -46,41 +45,39 @@ Deno.serve(async (request: Request) => {
   }
 
   try {
-    const response = await handleDenoRequest(request);
+  const { handleDenoRequest } = await import("./runtime/deno-worker.ts");
 
+  const response = await handleDenoRequest(request);
+  const headers = new Headers(response.headers);
 
+  headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-allow-methods", "GET, POST, HEAD, OPTIONS");
+  headers.set(
+    "access-control-allow-headers",
+    "authorization, x-client-info, apikey, content-type",
+  );
 
-    const response = await handleDenoRequest(request);
-    const headers = new Headers(response.headers);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+} catch (error) {
+  console.error("[supabase index error]", error);
 
-    headers.set("access-control-allow-origin", "*");
-    headers.set("access-control-allow-methods", "GET, POST, HEAD, OPTIONS");
-    headers.set(
-      "access-control-allow-headers",
-      "authorization, x-client-info, apikey, content-type",
-    );
-
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
-  } catch (error) {
-    console.error("[supabase index error]", error);
-
-    return new Response(
-      JSON.stringify({
-        error: "Supabase Function Error",
-        message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : "",
-      }),
-      {
-        status: 500,
-        headers: {
-          ...corsHeaders(),
-          "content-type": "application/json; charset=utf-8",
-        },
+  return new Response(
+    JSON.stringify({
+      error: "Supabase Function Error",
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : "",
+    }),
+    {
+      status: 500,
+      headers: {
+        ...corsHeaders(),
+        "content-type": "application/json; charset=utf-8",
       },
-    );
-  }
-});
+    },
+  );
+}
+
