@@ -46,8 +46,8 @@ Deno.serve(async (request: Request) => {
 
   try {
     const { handleDenoRequest } = await import(
-  "./runtime/deno-worker.ts"
-);
+      "../../../runtime/deno-worker.ts"
+    );
 
 
     const response = await handleDenoRequest(request);
