@@ -23,7 +23,7 @@ jobs:
 
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_PROJECT_IDS: ${{ secrets.SUPABASE_PROJECT_IDS }}
+      SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
 
     steps:
       - name: Checkout
@@ -37,25 +37,5 @@ jobs:
       - name: Show Supabase CLI version
         run: supabase --version
 
-      - name: Prepare danmu function files
-        run: |
-          echo "Preparing files for Supabase Edge Function..."
-
-          mkdir -p supabase/functions/danmu/runtime
-
-          cp runtime/deno-worker.ts supabase/functions/danmu/runtime/deno-worker.ts
-
-          rm -rf supabase/functions/danmu/danmu_api
-          cp -r danmu_api supabase/functions/danmu/danmu_api
-
-          echo "Prepared file structure:"
-          find supabase/functions/danmu -maxdepth 3 -type f | sort
-
-      - name: Deploy danmu function to all projects
-        run: |
-          for project_ref in $SUPABASE_PROJECT_IDS; do
-            echo "Deploying danmu function to $project_ref"
-            supabase functions deploy danmu \
-              --project-ref "$project_ref" \
-              --no-verify-jwt
-          done
+      - name: Deploy danmu function
+        run: supabase functions deploy danmu --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
