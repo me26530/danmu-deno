@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { handleDenoRequest } from "./runtime/deno-worker.ts";
 
 function corsHeaders(): HeadersInit {
   return {
@@ -42,8 +43,6 @@ Deno.serve(async (request: Request) => {
   }
 
   try {
-    const { handleDenoRequest } = await import("./runtime/deno-worker.ts");
-
     const response = await handleDenoRequest(request);
     const headers = new Headers(response.headers);
 
