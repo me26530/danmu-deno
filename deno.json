@@ -1,4 +1,7 @@
 {
+  "tasks": {
+    "start": "deno run --allow-net --allow-env src/main.ts"
+  },
   "imports": {
     "pako": "npm:pako@2.1.0",
     "node-fetch": "npm:node-fetch@3.3.2",
@@ -19,5 +22,9 @@
       "dom.iterable",
       "esnext"
     ]
+  },
+  "deploy": {
+    "project": "danmu-api",
+    "entrypoint": "src/main.ts"
   }
 }

@@ -873,18 +873,10 @@ function isRunningOnVercel() {
 
 function detectDeployPlatform(env) {
   // Supabase Edge Functions / 普通 Deno 运行时适配。
-  if (env?.DANMU_DEPLOY_PLATFORM) {
-    return env.DANMU_DEPLOY_PLATFORM;
-  }
-  if (env?.DENO_DEPLOYMENT_ID || env?.SB_REGION || env?.SUPABASE_URL) {
-    return "supabase";
-  }
-  if (typeof Deno !== 'undefined') {
-    return "deno";
-  }
-  if (env?.SPACE_ID || (typeof process !== 'undefined' && process.env?.SPACE_ID)) {
-    return "huggingface";
-  }
+  if (env?.DANMU_DEPLOY_PLATFORM) return env.DANMU_DEPLOY_PLATFORM;
+  if (env?.DENO_DEPLOYMENT_ID || env?.SB_REGION || env?.SUPABASE_URL) return "supabase";
+  if (typeof Deno !== 'undefined') return "deno";
+  if (env?.SPACE_ID || (typeof process !== 'undefined' && process.env?.SPACE_ID)) return "huggingface";
   return isRunningOnVercel() ? "vercel" : "cloudflare";
 }
 
