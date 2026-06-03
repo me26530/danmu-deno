@@ -44,9 +44,13 @@ jobs:
           mkdir -p supabase/functions/danmu/runtime
 
           cp runtime/deno-worker.ts supabase/functions/danmu/runtime/deno-worker.ts
+          cp deno.json supabase/functions/danmu/deno.json
+          cp package.json supabase/functions/danmu/package.json
 
           rm -rf supabase/functions/danmu/danmu_api
           cp -r danmu_api supabase/functions/danmu/danmu_api
+          # Edge Function 不需要测试文件，删除可减少部署体积，并避免无关 Node 测试依赖被扫描。
+          find supabase/functions/danmu/danmu_api -name "*.test.js" -type f -delete
 
           if [ -d config ]; then
             rm -rf supabase/functions/danmu/config
@@ -54,18 +58,29 @@ jobs:
           fi
 
           echo "Checking required files..."
+          test -f supabase/functions/danmu/index.ts
           test -f supabase/functions/danmu/runtime/deno-worker.ts
           test -f supabase/functions/danmu/danmu_api/worker.js
+          test -f supabase/functions/danmu/deno.json
+          test -f supabase/functions/danmu/package.json
 
           echo "Prepared file structure:"
           find supabase/functions/danmu -maxdepth 4 -type f | sort
+
+      - name: Check Supabase secrets
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "SUPABASE_ACCESS_TOKEN is empty" >&2
+            exit 1
+          fi
+          if [ -z "$SUPABASE_PROJECT_IDS" ]; then
+            echo "SUPABASE_PROJECT_IDS is empty" >&2
+            exit 1
+          fi
 
       - name: Deploy danmu function to all projects
         run: |
           for project_ref in $SUPABASE_PROJECT_IDS; do
             echo "Deploying danmu function to $project_ref"
-            supabase functions deploy danmu \
-              --project-ref "$project_ref" \
-              --no-verify-jwt \
-              --debug
+            supabase functions deploy danmu               --project-ref "$project_ref"               --no-verify-jwt               --debug
           done

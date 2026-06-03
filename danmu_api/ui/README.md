@@ -1,160 +1,190 @@
-# 目录
-
-- [UI 系统使用说明](#ui-系统使用说明)
-- [功能概览](#功能概览)
-- [访问方式](#访问方式)
-- [功能详解](#功能详解)
-  - [1. 配置预览](#1-配置预览)
-  - [2. 日志查看](#2-日志查看)
-  - [3. 接口调试/弹幕测试](#3-接口调试弹幕测试)
-  - [4. 推送弹幕](#4-推送弹幕)
-  - [5. 请求记录](#5-请求记录)
-  - [6. 系统配置](#6-系统配置)
-- [安全说明](#安全说明)
-- [部署平台支持](#部署平台支持)
-- [部署平台环境变量配置指南](#部署平台环境变量配置指南)
-  - [各平台变量获取详细步骤](#各平台变量获取详细步骤)
-    - [1. Vercel 平台](#1-vercel-平台)
-    - [2. Netlify 平台](#2-netlify-平台)
-    - [3. EdgeOne (腾讯云 Pages) 平台](#3-edgeone-腾讯云-pages-平台)
-    - [4. Cloudflare 平台](#4-cloudflare-平台)
-  - [常见问题](#常见问题)
-- [API 端点](#api-端点)
-- [故障排除](#故障排除)
-
 # UI 系统使用说明
 
-本项目包含一个基于 Web 的用户界面，用于管理和配置弹幕 API 服务。以下是 UI 系统的详细使用说明。
+这个目录对应项目内置的 Web UI 管理后台。它不是单独的前端项目，而是直接由服务端输出 HTML / CSS / JS，用来管理当前弹幕 API 服务实例。
 
-## 功能概览
+## UI 入口与权限
 
-UI 系统提供了以下主要功能模块：
+访问方式：
 
-1. **配置预览** - 查看当前生效的环境变量配置
-2. **日志查看** - 实时查看系统运行日志
-3. **接口调试/弹幕测试** - 测试和调试弹幕 API 接口
-4. **推送弹幕** - 向播放器推送弹幕
-5. **请求记录** - 查看最近的 API 请求记录
-6. **系统配置** - 环境变量配置和系统管理
+- 普通界面：`http://your-domain/{TOKEN}`
+- 管理员界面：`http://your-domain/{ADMIN_TOKEN}`
 
-## 访问方式
+补充说明：
 
-UI 系统需要通过在 URL 中添加 TOKEN 来访问，以确保安全性：
+- 当 `TOKEN` 仍为默认值 `87654321` 时，很多普通接口可以省略 token 前缀。
+- UI 根路径 `/` 也可以打开页面，但是否具备管理能力取决于当前访问 token。
+- 只有 `ADMIN_TOKEN` 访问下，才允许修改环境变量、清缓存、重部署、在线更新、保存 Cookie、执行 AI 连通性测试等写操作。
 
-- 普通功能访问：`http://your-domain/{TOKEN}`
-- 系统管理功能：`http://your-domain/{ADMIN_TOKEN}`
+## 当前 UI 包含的模块
 
-## 功能详解
+### 1. 服务概览
 
-### 1. 配置预览
+用于快速查看：
 
-在配置预览页面，您可以：
+- 接入地址
+- 当前访问模式
+- 服务状态
+- 版本状态
+- 已识别配置项和已填写配置项数量
+- 部署配置状态
 
-- 查看当前生效的环境变量配置
-- 了解各配置项的当前值和描述
-- 配置按类别分组显示（API配置、源配置、匹配配置等）
+### 2. 运行日志
 
-### 2. 日志查看
+支持：
 
-日志查看页面提供：
+- 手动刷新
+- 自动刷新
+- 关键字搜索
+- 级别筛选
+- 自动换行 / 自动滚动
+- 导出日志
+- 清空日志
 
-- 实时日志监控
-- 刷新日志功能
-- 清空日志功能（需要 ADMIN_TOKEN）
+说明：
 
-### 3. 接口调试/弹幕测试
+- 非管理员查看日志时，日志中的 IP 会做脱敏处理。
+- 清空日志属于管理员操作。
 
-接口调试功能允许您：
+### 3. API 测试平台
 
-- 选择不同的 API 接口进行测试
-- 输入接口参数
-- 发送请求并查看响应结果
-- 支持的接口包括：
-  - 搜索动漫 - `/api/v2/search/anime`
-  - 搜索剧集 - `/api/v2/search/episodes`
-  - 匹配动漫 - `/api/v2/match`
-  - 获取番剧详情 - `/api/v2/bangumi/:animeId`
-  - 获取弹幕 - `/api/v2/comment/:commentId`
+分为两种模式：
 
-弹幕测试功能允许您：
+- 接口测试
+- 弹幕测试
 
-- 自动匹配测试：输入文件名自动匹配并获取弹幕，模拟播放器自动加载流程
-- 手动匹配测试：搜索动漫 → 选择番剧 → 选择剧集 → 获取弹幕
-- 弹幕统计：弹幕数、时长、高能时刻、平均密度、匹配时长、类型分布
-- 弹幕热力图：按时间段可视化弹幕密度分布
-- 弹幕列表：支持全部/滚动/顶部/底部过滤，显示颜色和类型标签，懒加载每次100条
-- 导出功能：支持导出JSON和XML格式弹幕文件
-- 时长处理：优先请求 `/api/v2/comment/:commentId?format=json&duration=true` 返回的 `videoDuration`，没有真实时长时再回退到尾部裁剪算法
-- 视图导航优化：搜索结果/剧集详情/弹幕详情逐级切换，带返回按钮和加载动画
+接口测试覆盖：
+
+- `/api/v2/search/anime`
+- `/api/v2/search/episodes`
+- `/api/v2/match`
+- `/api/v2/bangumi/:animeId`
+- `/api/v2/comment/:commentId`
+- `/api/v2/comment?url=...`
+- `/api/v2/segmentcomment`
+
+弹幕测试提供：
+
+- 自动匹配测试
+- 手动搜索测试
+- 弹幕统计
+- 高能热力图
+- 类型过滤
+- JSON / XML 导出
 
 ### 4. 推送弹幕
 
-推送弹幕功能支持：
+用于把当前匹配到的弹幕推送给播放器。
 
-- 向 OK 影视等播放器推送弹幕
-- 搜索动漫并选择剧集
-- 推送地址格式如：`http://127.0.0.1:9978/action?do=refresh&type=danmaku&path=`
-- 需要在同一局域网或使用公网 IP
+典型场景：
 
+- OK 影视
+- 支持 HTTP 刷新的本地播放器
 
-### 5. 请求记录
+默认地址可通过 `DANMU_PUSH_URL` 预填。
 
-请求记录页面提供：
+### 5. 访问记录
 
-- 查看最近一段时间内的 API 请求历史
-- 显示每条请求的详细信息，包括：
-  - 请求时间
-  - 请求方法 (GET, POST, etc.)
-  - 请求 URL
-  - 请求参数
-  - 请求来源 IP
-- 查看今日请求总数
+显示最近请求历史，包括：
 
-### 6. 系统配置
+- 请求时间
+- 请求方法
+- 请求路径
+- 请求参数
+- 请求来源 IP
+- 今日请求总数
 
-系统配置页面包含：
+### 6. 系统设置
 
-#### 环境变量管理
-- **API配置** - API 相关设置
-- **源配置** - 数据源配置
-- **匹配配置** - 匹配算法设置
-- **弹幕配置** - 弹幕相关参数
-- **缓存配置** - 缓存策略设置
-- **系统配置** - 系统级配置
+这是管理员模块，包含：
 
-#### 配置项类型
-- **文本** - 普通文本输入
-- **布尔值** - 开关选择
-- **数字** - 数字滚轮输入 (带范围限制)
-- **单选** - 从预定义选项中选择
-- **多选** - 选择多个选项并可拖动排序
+- 环境变量查看 / 修改 / 删除
+- 云平台环境变量写回
+- 缓存清理
+- 云端重部署
+- Bilibili Cookie 管理
+- AI 连通性测试
 
-#### 系统管理功能
-- **清理缓存** - 清除系统缓存（需要 ADMIN_TOKEN）
-- **重新部署** - 重新部署系统（需要 ADMIN_TOKEN）
+## 运行状态与版本面板
 
-## 安全说明
+这是近期新增的重点功能。
 
-- 访问 UI 系统需要在 URL 中配置 TOKEN
-- 系统管理功能（日志查看、环境变量配置等）需要 ADMIN_TOKEN
-- 确保 TOKEN 和 ADMIN_TOKEN 的安全性
+入口：
 
-## 部署平台支持
+- 侧边栏状态卡片
+- 桌面端首页版本标签
+- 移动端版本徽章
 
-系统支持多种部署平台：
+面板内容：
 
-- Node.js
+- 当前版本
+- 最新版本
+- 运行时类型
+- 运行状态
+- 当前访问身份（只读 / 管理员）
+- CPU / 内存 / 网络指标
+- 当前更新阶段
+- 更新日志
+
+当前行为：
+
+- 侧边栏状态卡片秒级刷新
+- 详情弹窗打开后也会秒级刷新
+- 展开的“服务详情”和“更新日志”在刷新时会保留，不会自动收起
+
+权限规则：
+
+- `GET /api/runtime/info`：公开只读
+- `POST /api/runtime/check-update`：公开只读
+- `POST /api/runtime/update`：管理员写操作
+
+也就是说：
+
+- 普通访客可以查看版本和运行状态
+- 只有管理员可以执行在线更新或云端重部署
+
+## 不同部署形态下的表现
+
+### Node.js 本地模式
+
+- 可查看 CPU / 内存
+- 可查看版本
+- 不支持在线更新
+- 配置文件改动大多可热加载
+
+### Docker 模式
+
+- 可查看 CPU / 内存 / 网络
+- 可检查镜像版本
+- 可执行 Docker 在线更新
+
+要启用 Docker 在线更新，通常需要：
+
+- `ENABLE_RUNTIME_CONTROL=true`
+- 挂载 `/var/run/docker.sock`
+- 根据需要配置 `DOCKER_CONTAINER_NAME`
+- 根据需要配置 `DOCKER_IMAGE_NAME`
+
+### 云平台模式
+
+- 可查看版本和状态
+- 不显示 CPU / 内存 / 网络指标
+- 可触发云端重部署
+
+当前文档对应的云平台部署控制能力已接入：
+
 - Vercel
 - Netlify
-- Cloudflare
-- Docker
-- EdgeOne
+- Cloudflare Workers
+- EdgeOne Pages
 
-根据部署平台的不同，可能需要配置额外的环境变量。
+说明：
 
-## 部署平台环境变量配置指南
+- 云平台重部署依赖 `DEPLOY_PLATFROM_ACCOUNT`、`DEPLOY_PLATFROM_PROJECT`、`DEPLOY_PLATFROM_TOKEN`
+- 如果未配置这些参数，系统设置页会提示缺失项
 
-### 平台与所需变量对照表
+## 云平台环境变量与在线重部署
+
+这一节专门回答两个问题：
 
 | 平台 | DEPLOY_PLATFROM_ACCOUNT | DEPLOY_PLATFROM_PROJECT | DEPLOY_PLATFROM_TOKEN |
 |------|----------------------|----------------------|---------------------|
@@ -166,7 +196,10 @@ UI 系统需要通过在 URL 中添加 TOKEN 来访问，以确保安全性：
 | Node.js | ❌ | ❌ | ❌ |
 | Docker | ❌ | ❌ | ❌ |
 
----
+- 哪些最小环境变量必须先手动配好，前端才能开始改配置
+- 各平台里的 `DEPLOY_PLATFROM_*` 到底分别该填什么
+
+先记住一条总规则：
 
 ### 5. Hugging Face Spaces 平台
 
@@ -194,152 +227,325 @@ UI 系统需要通过在 URL 中添加 TOKEN 来访问，以确保安全性：
 
 ### 各平台变量获取详细步骤
 
-#### 1. Vercel 平台
+- 第一次启用管理员 UI 时，必须先在云平台控制台里手动写入 `ADMIN_TOKEN`
+- 然后使用 `/{ADMIN_TOKEN}` 打开页面
+- 只有这样，系统设置页里的环境变量写回、云端重部署、Cookie 保存、AI 连通性测试这些管理员操作才会出现并可执行
 
-#### 需要的变量
-- `DEPLOY_PLATFROM_PROJECT`: 项目 ID
-- `DEPLOY_PLATFROM_TOKEN`: API Token
+### 所有云平台都要先满足的条件
 
-#### 获取步骤
+| 项目 | 是否必需 | 作用 |
+|---|---|---|
+| `TOKEN` | 建议 | 普通 UI / API 访问令牌 |
+| `ADMIN_TOKEN` | 必需 | 管理员 UI 入口，不配置就没有管理员能力 |
+| `DEPLOY_PLATFROM_*` | 视平台而定 | 让 UI 能调用平台 API 写回环境变量并触发重部署 |
+| `RUNTIME_MODE=cloud` | 可选 | 一般不需要；只有运行时识别失败时再补 |
 
-**获取 Project ID (`DEPLOY_PLATFROM_PROJECT`)**
+补充说明：
 
-1. 登录 [Vercel Dashboard](https://vercel.com/dashboard)
-2. 选择你的项目
-3. 进入项目后,点击 **Settings** 标签
-4. 在左侧菜单中选择 **General**
-5. 向下滚动找到 **Project ID** 部分
-6. 复制显示的项目 ID(格式类似: `prj_xxxxxxxxxxxx`)
+- Vercel / Netlify / Cloudflare / EdgeOne 这类部署，真正生效的是平台控制台里的环境变量，不是本地 `config/.env`
+- Node / Docker 可以热加载多数配置；云平台通常要重新部署后，新实例才会读取到改动
+- 运行状态面板的只读信息不要求 `ADMIN_TOKEN`，但写操作一定要求
 
-**获取 API Token (`DEPLOY_PLATFROM_TOKEN`)**
+### 平台字段含义总览
 
-1. 点击右上角头像,选择 **Settings**
-2. 在左侧菜单中选择 **Tokens**
-3. 点击 **Create Token** 按钮
-4. 输入 Token 名称(如: `environment-variables-api`)
-5. 选择 **Scope**:
-   - 可以选择 **Full Account** 或特定项目
-   - 建议选择特定项目以提高安全性
-6. 设置过期时间(可选)
-7. 点击 **Create** 创建 Token
-8. **立即复制并保存** Token(只显示一次)
+| 平台 | `DEPLOY_PLATFROM_ACCOUNT` | `DEPLOY_PLATFROM_PROJECT` | `DEPLOY_PLATFROM_TOKEN` |
+|---|---|---|---|
+| Vercel | 不需要 | Vercel Project ID，通常以 `prj_` 开头 | Vercel Access Token |
+| Netlify | Team slug 或 account ID | Site ID，Netlify UI 中也叫 Project ID | Netlify Personal Access Token |
+| Cloudflare Workers | Cloudflare Account ID | Worker 脚本名 | Cloudflare API Token |
+| EdgeOne Pages | 当前实现不使用，可留空 | EdgeOne Pages `ProjectId` | EdgeOne Pages API Token |
 
----
+### Vercel
 
-### 2. Netlify 平台
+推荐最小配置：
 
-#### 需要的变量
-- `DEPLOY_PLATFROM_ACCOUNT`: 账户 ID
-- `DEPLOY_PLATFROM_PROJECT`: 站点 ID
-- `DEPLOY_PLATFROM_TOKEN`: Personal Access Token
+```env
+TOKEN=your-token
+ADMIN_TOKEN=your-admin-token
+DEPLOY_PLATFROM_PROJECT=prj_xxxxxxxxxxxx
+DEPLOY_PLATFROM_TOKEN=your-vercel-access-token
+```
 
-#### 获取步骤
+在哪里找：
 
-**获取 Account ID (`DEPLOY_PLATFROM_ACCOUNT`)**
+- `DEPLOY_PLATFROM_PROJECT`
+  进入项目后打开 `Settings -> General -> Project ID`
+- `DEPLOY_PLATFROM_TOKEN`
+  进入账号 Token 页面：<https://vercel.com/account/tokens>
+- 环境变量页面
+  进入项目后打开 `Settings -> Environment Variables`
+- 部署记录页面
+  进入项目后打开 `Deployments`
 
-1. 登录 [Netlify Dashboard](https://app.netlify.com/)
-2. 点击左下角头像,选择 **User settings**
-3. 点击 **Team settings** 可以看到你的 Account Slug
-4. 或者在左侧菜单选择 **Applications**
-5. 在 API 端点中可以找到 Account ID
+官方文档：
 
-**获取 Site ID (`DEPLOY_PLATFROM_PROJECT`)**
+- [Vercel Environment Variables](https://vercel.com/docs/environment-variables)
+- [Vercel General Settings](https://vercel.com/docs/projects/project-configuration/general-settings)
+- [How do I use a Vercel API access token?](https://examples.vercel.com/guides/how-do-i-use-a-vercel-api-access-token)
 
-1. 在 Netlify Dashboard 中选择你的项目
-2. 进入项目后,点击 **Project configuration**
-3. 在 **General** > **Project details** 部分
-4. 找到 **Project information** 下的 **Project ID**
-5. 复制显示的站点 ID(格式类似: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+实现说明：
 
-**获取 Personal Access Token (`DEPLOY_PLATFROM_TOKEN`)**
+- 当前项目对 Vercel 的环境变量读写使用的是 Project API，所以这里必须填 Project ID，不是项目名。
+- 触发“重新部署”时，会基于最近一次生产部署重新发起部署。
+- 按 Vercel 官方说明，环境变量改动不会自动作用到旧部署，所以前端修改完后仍需要重部署，这也是 UI 里会继续提供“重新部署”按钮的原因。
 
-1. 点击左下角头像,选择 **User settings**
-2. 在左侧菜单中选择 **Applications**
-3. 滚动到 **Personal access tokens** 部分
-4. 点击 **New access token** 按钮
-5. 输入 Token 描述(如: `Environment Variables API`)
-6. 点击 **Generate token**
-7. **立即复制并保存** Token(只显示一次)
+### Netlify
 
----
+推荐最小配置：
 
-### 3. EdgeOne (腾讯云 Pages) 平台
+```env
+TOKEN=your-token
+ADMIN_TOKEN=your-admin-token
+DEPLOY_PLATFROM_ACCOUNT=your-team-slug
+DEPLOY_PLATFROM_PROJECT=your-site-id
+DEPLOY_PLATFROM_TOKEN=your-netlify-pat
+```
 
-#### 需要的变量
-- `DEPLOY_PLATFROM_PROJECT`: 项目 ID
-- `DEPLOY_PLATFROM_TOKEN`: API 密钥
+在哪里找：
 
-#### 获取步骤
+- `DEPLOY_PLATFROM_ACCOUNT`
+  推荐直接填 Team slug；按 `Team settings -> General -> Team information` 查找
+- `DEPLOY_PLATFROM_PROJECT`
+  按 `Project configuration -> General -> Project information` 查找 Project ID
+- `DEPLOY_PLATFROM_TOKEN`
+  打开 Personal Access Token 页面：<https://app.netlify.com/user/applications#personal-access-tokens>
+- 环境变量页面
+  打开 `Project configuration -> Environment variables`
+- 部署记录页面
+  打开 `Deploys`
 
-**获取 Project ID (`DEPLOY_PLATFROM_PROJECT`)**
+官方文档：
 
-1. 登录 [腾讯云 EdgeOne 控制台](https://console.cloud.tencent.com/edgeone)
-2. 进入 **Pages** 服务
-3. 选择你的项目
-4. 在URL可以看到项目 ID(格式类似: `pages-xxxxxxxxxxxx`)
+- [Netlify environment variables overview](https://docs.netlify.com/build/environment-variables/overview/)
+- [Get started with the Netlify API](https://docs.netlify.com/api-and-cli-guides/api-guides/get-started-with-api/)
+- [Get started with Netlify CLI](https://docs.netlify.com/api-and-cli-guides/cli-guides/get-started-with-cli/)
 
-**获取 API 密钥 (`DEPLOY_PLATFROM_TOKEN`)**
+实现说明：
 
-1. 登录 [腾讯云 EdgeOne 控制台](https://console.cloud.tencent.com/edgeone)
-2. 进入 **Pages** 服务
-3. 选择 **API Token** 标签页 
-4. 点击 **创建 API Token** 按钮
-5. 输入描述和过期时间，点击提交后复制相应Token
+- 当前项目调用的是 Netlify Accounts / Env API，因此 `DEPLOY_PLATFROM_ACCOUNT` 建议直接填 team slug 或 account ID。
+- `DEPLOY_PLATFROM_PROJECT` 实际上传给 API 的是 `site_id`，所以这里必须填 Site ID / Project ID。
+- Netlify 的环境变量改动通常需要新的 deploy/build 才会体现在运行实例里，所以前端改完后要继续触发一次“重新部署”。
 
----
+### Cloudflare Workers
 
-### 4. Cloudflare 平台
+推荐最小配置：
 
-#### 需要的变量
-- `DEPLOY_PLATFROM_ACCOUNT`: 账户 ID
-- `DEPLOY_PLATFROM_PROJECT`: Workers 脚本名称
-- `DEPLOY_PLATFROM_TOKEN`: API Token
+```env
+TOKEN=your-token
+ADMIN_TOKEN=your-admin-token
+DEPLOY_PLATFROM_ACCOUNT=your-account-id
+DEPLOY_PLATFROM_PROJECT=your-worker-name
+DEPLOY_PLATFROM_TOKEN=your-cloudflare-api-token
+```
 
-#### 获取步骤
+在哪里找：
 
-**获取 Account ID (`DEPLOY_PLATFROM_ACCOUNT`)**
+- `DEPLOY_PLATFROM_ACCOUNT`
+  进入 `Workers & Pages` 页面后，可在账号信息区域看到 Account ID
+- `DEPLOY_PLATFROM_PROJECT`
+  填当前 Worker 的脚本名
+- `DEPLOY_PLATFROM_TOKEN`
+  打开 API Token 页面：<https://dash.cloudflare.com/profile/api-tokens>
+- 环境变量页面
+  进入 `Workers & Pages -> 你的 Worker -> Settings -> Variables and Secrets`
 
-1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 在右侧可以看到 **Account ID**
-3. 或者点击任意域名,在右侧栏可以找到 **Account ID**
-4. 复制该 ID(格式类似: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+官方文档：
 
-**获取 Workers 脚本名称 (`DEPLOY_PLATFROM_PROJECT`)**
+- [Find account and zone IDs](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/)
+- [Create API token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)
+- [Cloudflare Workers environment variables](https://developers.cloudflare.com/workers/configuration/environment-variables/)
 
-1. 在 Cloudflare Dashboard 左侧菜单选择 **Workers & Pages**
-2. 找到你的 Workers 脚本
-3. 脚本名称就是列表中显示的名称
-4. 或者点击进入脚本详情,在 URL 中可以看到脚本名称
+实现说明：
 
-**获取 API Token (`DEPLOY_PLATFROM_TOKEN`)**
+- 当前项目这里走的是 Workers Script Settings API，不是通用的 Pages 项目环境变量接口。
+- 所以 `DEPLOY_PLATFROM_PROJECT` 应填 Worker 脚本名，不是域名，也不是 Pages 自定义项目标题。
+- 当前写回逻辑会把变量按普通文本绑定写入 Worker 设置，更适合一般配置项；如果你对 Cloudflare Secret 的掩码管理要求很高，建议敏感变量仍优先在控制台手动维护。
+- Cloudflare 这里没有额外的 `/api/deploy` 动作，项目当前实现把环境变量写回视为平台侧立即接管，前端重点是“写回变量”而不是单独触发一次云构建。
 
-1. 点击右上角头像,选择 **配置文件**
-2. 在左侧菜单选择 **API Tokens**
-3. 点击 **Create Token** 按钮
-4. 可以选择模板或自定义:
-   - 选择 **Edit Cloudflare Workers** 模板
-   - 或创建 **Custom token**
-5. 配置权限:
-   - **Account** > **Workers Scripts** > **Edit**
-   - 选择特定账户
-6. (可选)设置 IP 限制和 TTL
-7. 点击 **Continue to summary**
-8. 确认后点击 **Create Token**
-9. **立即复制并保存** Token(只显示一次)
+### EdgeOne Pages
 
----
+推荐最小配置：
 
-### 常见问题
+```env
+TOKEN=your-token
+ADMIN_TOKEN=your-admin-token
+DEPLOY_PLATFROM_PROJECT=your-project-id
+DEPLOY_PLATFROM_TOKEN=your-edgeone-pages-api-token
+```
 
-**Q: Token 创建后忘记复制怎么办?**  
-A: 大多数平台的 Token 只显示一次,如果忘记复制需要删除后重新创建。
+在哪里找：
 
-## API 端点
+- `DEPLOY_PLATFROM_TOKEN`
+  官方文档对应的控制台入口是 `API Token` 标签页，文档入口：<https://pages.edgeone.ai/document/api-token>
+- 环境变量页面
+  进入项目后查看 `Project Settings`
+- 部署记录 / 手动部署页面
+  进入 `Deployments` 或对应部署管理页
+- `DEPLOY_PLATFROM_PROJECT`
+  这里要求的是 Pages API 使用的 `ProjectId`
 
-在 UI 页面顶部显示当前 API 端点，可点击复制到剪贴板。
+官方文档：
 
-## 故障排除
+- [API Token](https://pages.edgeone.ai/document/api-token)
+- [Project Management](https://pages.edgeone.ai/document/project-management)
+- [Build Guide](https://pages.edgeone.ai/document/build-guide)
+- [Manage Deploys](https://pages.edgeone.ai/document/manage-deploys)
 
-- 如果无法访问功能页面，请检查 URL 中的 TOKEN 是否正确
-- 如果系统管理功能不可用，请确认 ADMIN_TOKEN 等环境变量是否已配置
-- 如遇到其他问题，请查看系统日志获取更多信息
+实现说明：
+
+- 当前实现只实际使用 `DEPLOY_PLATFROM_PROJECT` 和 `DEPLOY_PLATFROM_TOKEN`，`DEPLOY_PLATFROM_ACCOUNT` 可以留空。
+- 这里要求填写的是 `ProjectId`，不是项目显示名。官方文档目前没有把固定页面位置写得很死，所以如果你在控制台里没有直接看到该字段，建议以项目 API 返回值或控制台内部请求里显示的 `ProjectId` 为准。
+- 当前在线重部署请求固定使用 `main` 分支；如果你的生产分支不是 `main`，前端触发部署可能不会落到正确分支，这种情况下建议继续在 EdgeOne 控制台手动发起部署。
+
+### 推荐的启用顺序
+
+1. 先在云平台控制台手动配置 `TOKEN`、`ADMIN_TOKEN` 和对应 `DEPLOY_PLATFROM_*`
+2. 部署完成后，用 `/{ADMIN_TOKEN}` 打开管理员 UI
+3. 先在系统设置页检查“部署配置状态”是否完整
+4. 再使用前端继续修改其他业务环境变量
+5. 修改完后，按平台触发“重新部署”，或等待平台自身接管新配置
+
+## Bilibili Cookie 管理
+
+当你在系统设置里编辑 `BILIBILI_COOKIE` 时，UI 会切换到专用编辑面板。
+
+支持：
+
+- 获取当前 Cookie 状态
+- 扫码登录
+- 校验 Cookie 有效性
+- 使用 `refresh_token` 刷新 Cookie
+- 保存到当前部署环境
+
+说明：
+
+- 推荐直接用扫码登录，自动填入完整 Cookie。
+- 手动填写时，建议至少包含 `SESSDATA` 和 `bili_jct`。
+
+## AI 连通性验证
+
+当你在系统设置里配置 AI 相关变量后，可以直接在 UI 中测试连通性。
+
+相关变量：
+
+- `AI_BASE_URL`
+- `AI_MODEL`
+- `AI_API_KEY`
+- `AI_MATCH_PROMPT`
+- `AI_TRUST_MATCH_RESULT`
+
+用途：
+
+- 验证当前 AI 配置是否可用
+- 辅助排查模型地址、密钥、响应格式是否正确
+
+## 哪些变量适合在 UI 改，哪些不适合
+
+适合在 UI 中修改的：
+
+- 大部分业务环境变量
+- 平台密钥
+- 缓存、匹配、弹幕处理类参数
+- Cookie、AI、运行时控制参数
+
+建议直接在部署平台或容器启动参数中管理的：
+
+- `DANMU_API_PORT`
+- `LOCAL_PROXY_BIND`
+- `LOCAL_PROXY_TOKEN`
+- 首次启用 / 关闭正向代理时的 `PROXY_URL`
+
+原因：
+
+- 这些变量会影响监听端口或 5321 辅助代理服务是否启动。
+- 改完后通常需要重启进程或重新部署，UI 修改后也不会自动重绑监听。
+
+## UI 使用到的接口
+
+### 只读接口
+
+- `GET /api/config`
+- `GET /api/logs`
+- `GET /api/reqrecords`
+- `GET /api/runtime/info`
+- `POST /api/runtime/check-update`
+- `GET /api/cookie/status`
+
+### 管理写接口
+
+- `POST /api/logs/clear`
+- `POST /api/cache/clear`
+- `POST /api/deploy`
+- `POST /api/runtime/update`
+- `POST /api/env/set`
+- `POST /api/env/add`
+- `POST /api/env/del`
+- `POST /api/cookie/qr/generate`
+- `POST /api/cookie/qr/check`
+- `POST /api/cookie/verify`
+- `POST /api/cookie/save`
+- `POST /api/cookie/clear`
+- `POST /api/cookie/refresh`
+- `POST /api/cookie/refresh-token`
+- `POST /api/ai/verify`
+
+## CSS 架构维护指南
+
+当前 UI 样式已按职责拆分，建议按下面的入口维护：
+
+- `css/tokens.css.js`：全局设计变量
+- `css/foundation.css.js`：重置、布局骨架、页脚与加载层
+- `css/shell.css.js`：应用壳层、侧边栏、导航、版本卡
+- `css/components-shared.css.js`：按钮、卡片、模态等复用组件
+- `css/forms-controls.css.js`：表单控件
+- `css/feature-overview.css.js`：服务概览与日志相关样式
+- `css/feature-settings.css.js`：系统设置、运行状态弹窗、Cookie / AI 编辑器
+- `css/feature-api.css.js`：接口测试与弹幕测试
+- `css/status.css.js`：状态类样式
+- `css/theme-dark.css.js`：深色模式补充覆盖
+- `css/responsive.css.js`：响应式与移动端适配
+
+维护约定：
+
+1. 新样式优先放到对应模块文件，不要把不同功能继续堆在一起。
+2. 深色模式差异统一放到 `theme-dark.css.js`。
+3. 响应式规则统一放到 `responsive.css.js`。
+4. 新功能页建议新增 `feature-xxx.css.js`，不要继续把大块样式塞回旧文件。
+5. 不要在已废弃文件 `base.css.js`、`colors.css.js`、`components.css.js`、`cookie-editor.css.js`、`dynamic.css.js`、`forms.css.js`、`mode-badge.css.js` 中继续追加样式。
+
+## 常见问题
+
+### 运行状态面板提示 `Unauthorized`
+
+先确认：
+
+- 你访问的是当前服务实例，而不是其他反代路径
+- 反代没有把 `/api/runtime/*` 拦掉
+- 如果是管理员操作，当前 URL 使用的是 `ADMIN_TOKEN`
+
+### 运行状态面板提示 `.cache` 写入失败
+
+在只读文件系统环境下，运行时状态现在会自动回退到内存态。
+如果仍报错，通常是部署环境把请求打到了旧版本实例，或者服务还没有完成新版本发布。
+
+### 云平台看不到 CPU / 内存 / 网络
+
+这是预期行为。
+云平台运行时只提供版本和状态读取，不提供宿主机资源指标。
+
+### 系统设置页不能执行重部署
+
+检查下面几项：
+
+- 是否使用 `ADMIN_TOKEN` 访问
+- 是否已配置 `DEPLOY_PLATFROM_*`
+- 当前部署平台是否在已接入的支持列表中
+
+### Docker 在线更新按钮不可用
+
+检查下面几项：
+
+- 是否设置了 `ENABLE_RUNTIME_CONTROL=true`
+- 是否挂载了 docker socket
+- 容器是否能识别当前自身容器名
+- 是否使用 `ADMIN_TOKEN` 访问

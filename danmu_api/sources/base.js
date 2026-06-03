@@ -2,6 +2,19 @@ import { log } from "../utils/log-util.js";
 import { convertToDanmakuJson } from "../utils/danmu-util.js";
 import { extractAnimeTitle, extractYear } from "../utils/common-util.js";
 
+function getAnimeIdentityKey(anime) {
+  if (!anime || typeof anime !== 'object') return '';
+
+  const sourcePrefix = anime.source ? `${String(anime.source)}:` : '';
+  if (anime.bangumiId !== undefined && anime.bangumiId !== null && String(anime.bangumiId) !== '') {
+    return `bangumi:${sourcePrefix}${String(anime.bangumiId)}`;
+  }
+  if (anime.animeId !== undefined && anime.animeId !== null && String(anime.animeId) !== '') {
+    return `anime:${sourcePrefix}${String(anime.animeId)}`;
+  }
+  return '';
+}
+
 // =====================
 // 源基类
 // =====================
@@ -22,7 +35,7 @@ export default class BaseSource {
   }
 
   // 处理animes结果，用数据模型Anime存储
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, extra = null, detailStore = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, vodName, detailStore = null) {
     throw new Error("Method 'handleAnimes' must be implemented");
   }
 
@@ -47,7 +60,7 @@ export default class BaseSource {
   }
 
   // 获取弹幕流水线方法(获取某集弹幕 -> 格式化弹幕 -> 弹幕处理，如去重/屏蔽字等)
-  async getComments(id, sourceName, segmentFlag=false, progressCallback=null) {
+  async getComments(id, sourceName, segmentFlag=false, progressCallback=null, offsetSeconds=0) {
     if (segmentFlag) {
       if(progressCallback) await progressCallback(5, `开始获取弹幕${sourceName}弹幕分片列表`);
       log("info", `开始获取弹幕${sourceName}弹幕分片列表`);
@@ -61,7 +74,7 @@ export default class BaseSource {
     const formatted = this.formatComments(raw);
     if(progressCallback) await progressCallback(100,`弹幕处理完成，共 ${formatted.length} 条`);
     log("info", `弹幕处理完成，共 ${formatted.length} 条`);
-    return convertToDanmakuJson(formatted, sourceName);
+    return convertToDanmakuJson(formatted, sourceName, offsetSeconds);
   }
 
   // 获取分片弹幕流水线方法(获取某集分片弹幕 -> 格式化弹幕 -> 弹幕处理，如去重/屏蔽字等)
@@ -108,7 +121,13 @@ export default class BaseSource {
       })
       .forEach(anime => {
         // 检查 curAnimes 中是否已存在相同 animeId 的动漫
-        const existingIndex = curAnimes.findIndex(a => a.animeId === anime.animeId);
+        const animeIdentityKey = getAnimeIdentityKey(anime);
+        const existingIndex = curAnimes.findIndex(a => {
+          if (!animeIdentityKey) {
+            return a.animeId === anime.animeId;
+          }
+          return getAnimeIdentityKey(a) === animeIdentityKey;
+        });
         if (existingIndex === -1) {
           // 不存在则添加
           curAnimes.push(anime);

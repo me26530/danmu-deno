@@ -1,4 +1,4 @@
-project_id = "danmu-deno"
+project_id = "danmu-api"
 
 [functions.danmu]
 verify_jwt = false

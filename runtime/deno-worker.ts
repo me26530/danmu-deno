@@ -3,6 +3,9 @@ import worker from "../danmu_api/worker.js";
 export function getEnv(): Record<string, string> {
   const env = Deno.env.toObject();
 
+  // 标记为 Supabase/Deno 运行时，避免主 worker 误判为 Cloudflare。
+  env.DANMU_DEPLOY_PLATFORM = env.DANMU_DEPLOY_PLATFORM || "supabase";
+
   if (!env.TOKEN) {
     env.TOKEN = "87654321";
   }

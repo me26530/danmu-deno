@@ -1,12 +1,14 @@
 import BaseSource from './base.js';
 import { log } from "../utils/log-util.js";
 import { buildQueryString, httpGet} from "../utils/http-util.js";
-import { printFirst200Chars, titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
-import { md5, convertToAsciiSum, decodeHtmlEntities } from "../utils/codec-util.js";
+import { preferSeasonCandidatesIfPresent, printFirst200Chars, resolveQuerySeason, titleMatches } from "../utils/common-util.js";
+import { convertToAsciiSum, decodeHtmlEntities } from "../utils/codec-util.js";
+import { md5 } from "../utils/crypto-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
 import { globals } from '../configs/globals.js';
 import { SegmentListResponse } from '../models/dandan-model.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取爱奇艺弹幕
@@ -16,6 +18,42 @@ export default class IqiyiSource extends BaseSource {
   static XOR_KEY = 0x75706971676c;
   static SECRET_KEY = "howcuteitis";
   static KEY_NAME = "secret_key";
+
+  constructor() {
+    super();
+    this.searchDeviceId = this._createIqiyiSearchDeviceId();
+  }
+
+  _createIqiyiSearchDeviceId() {
+    return md5(`${Date.now()}_${Math.random()}_iqiyi`).slice(0, 32);
+  }
+
+  _buildSearchParams(keyword) {
+    return {
+      key: keyword,
+      current_page: '1',
+      mode: '1',
+      source: 'input',
+      suggest: '',
+      pcv: '17.052.25283',
+      version: '17.052.25283',
+      pageNum: '1',
+      pageSize: '25',
+      pu: '',
+      u: this.searchDeviceId,
+      scale: '300',
+      token: '',
+      userVip: '0',
+      conduit: '',
+      vipType: '-1',
+      os: '10.0',
+      osShortName: 'win10',
+      dataType: '',
+      appMode: '',
+      ad: JSON.stringify({"lm":3,"azd":1000000000951,"azt":733,"position":"feed"}),
+      adExt: JSON.stringify({"r":"2.17.0-ares6-pure"})
+    };
+  }
 
   /**
    * 搜索爱奇艺内容
@@ -27,30 +65,7 @@ export default class IqiyiSource extends BaseSource {
       log("info", `[iQiyi] 开始搜索: ${keyword}`);
 
       // 使用桌面版 API 搜索
-      const params = {
-        key: keyword,
-        current_page: '1',
-        mode: '1',
-        source: 'input',
-        suggest: '',
-        pcv: '13.074.22699',
-        version: '13.074.22699',
-        pageNum: '1',
-        pageSize: '25',
-        pu: '',
-        u: 'f6440fc5d919dca1aea12b6aff56e1c7',
-        scale: '200',
-        token: '',
-        userVip: '0',
-        conduit: '',
-        vipType: '-1',
-        os: '',
-        osShortName: 'win10',
-        dataType: '',
-        appMode: '',
-        ad: JSON.stringify({"lm":3,"azd":1000000000951,"azt":733,"position":"feed"}),
-        adExt: JSON.stringify({"r":"2.1.5-ares6-pure"})
-      };
+      const params = this._buildSearchParams(keyword);
 
       // 手动构建 URL（httpGet 不支持 params 选项）
       const queryString = buildQueryString(params);
@@ -148,25 +163,24 @@ export default class IqiyiSource extends BaseSource {
       return null;
     }
 
-    // 提取 3D 与 2D 属性标签并追加至媒体类型
     let is3D = false;
     let is2D = false;
-    if (album.metaTags && Array.isArray(album.metaTags)) {
-        album.metaTags.forEach(tag => {
-            if (tag.name === '3D') is3D = true;
-            if (tag.name === '2D') is2D = true;
-        });
+    if (Array.isArray(album.metaTags)) {
+      album.metaTags.forEach(tag => {
+        if (tag?.name === "3D") is3D = true;
+        if (tag?.name === "2D") is2D = true;
+      });
     }
-    if (album.baseTags && Array.isArray(album.baseTags)) {
-        album.baseTags.forEach(tag => {
-            if (tag.value === '3D') is3D = true;
-            if (tag.value === '2D') is2D = true;
-        });
+    if (Array.isArray(album.baseTags)) {
+      album.baseTags.forEach(tag => {
+        if (tag?.value === "3D") is3D = true;
+        if (tag?.value === "2D") is2D = true;
+      });
     }
     if (is3D) {
-        mediaType = "3D" + mediaType;
+      mediaType = `3D${mediaType}`;
     } else if (is2D) {
-        mediaType = "2D" + mediaType;
+      mediaType = `2D${mediaType}`;
     }
 
     // 电影类型：使用 qipuId 作为 mediaId
@@ -644,14 +658,13 @@ export default class IqiyiSource extends BaseSource {
   }
 
   /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map|null} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
+   * 处理搜索结果并格式化为 DanDanPlay 格式
+   * @param {Array} sourceAnimes - 搜索结果数组
+   * @param {string} queryTitle - 搜索关键词
+   * @param {Array} curAnimes - 当前动漫列表
+   * @returns {Promise<void>}
    */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {
     const tmpAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
@@ -660,26 +673,14 @@ export default class IqiyiSource extends BaseSource {
       return [];
     }
 
-    let filteredAnimes = sourceAnimes.filter(s => titleMatches(s.title, queryTitle, querySeason));
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.title || '');
 
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查初始结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const s = extractSeasonNumberFromAnimeTitle(anime.title).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[iQiyi] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
-    const processIqiyiAnimes = await Promise.all(filteredAnimes.map(async (anime) => {
+    const matchedAnimes = seasonPreferredAnimes.filter(s => titleMatches(s.title, queryTitle));
+    const processedPayloads = await mapWithConcurrency(
+      matchedAnimes,
+      resolveSourceConcurrency('iqiyi', globals),
+      async (anime) => {
         try {
           const eps = await this.getEpisodes(anime.mediaId);
 
@@ -694,37 +695,44 @@ export default class IqiyiSource extends BaseSource {
             });
           }
 
-          if (links.length > 0) {
-            const numericAnimeId = convertToAsciiSum(anime.mediaId);
-            const transformedAnime = {
-              animeId: numericAnimeId,
-              bangumiId: anime.mediaId,
-              animeTitle: `${anime.title}(${anime.year || 'N/A'})【${anime.type}】from iqiyi`,
-              type: anime.type,
-              typeDescription: anime.type,
-              imageUrl: anime.imageUrl,
-              startDate: generateValidStartDate(anime.year),
-              episodeCount: links.length,
-              rating: 0,
-              isFavorited: true,
-              source: "iqiyi",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
-            addAnime({...transformedAnime, links: links}, detailStore);
+          const numericAnimeId = convertToAsciiSum(anime.mediaId);
+          const transformedAnime = {
+            animeId: numericAnimeId,
+            bangumiId: anime.mediaId,
+            animeTitle: `${anime.title}(${anime.year || 'N/A'})【${anime.type}】from iqiyi`,
+            type: anime.type,
+            typeDescription: anime.type,
+            imageUrl: anime.imageUrl,
+            startDate: generateValidStartDate(anime.year),
+            episodeCount: links.length,
+            rating: 0,
+            isFavorited: true,
+            source: "iqiyi",
+          };
 
-            if (globals.animes.length > globals.MAX_ANIMES) {
-              removeEarliestAnime();
-            }
-          }
+          return { transformedAnime, links };
         } catch (error) {
           log("error", `[iQiyi] Error processing anime: ${error.message}`);
+          return null;
         }
-      })
+      }
     );
 
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      const { transformedAnime, links } = payload;
+      tmpAnimes.push(transformedAnime);
+      addAnime({ ...transformedAnime, links }, detailStore);
+
+      if (globals.animes.length > globals.MAX_ANIMES) {
+        removeEarliestAnime();
+      }
+    }
+
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
-    return processIqiyiAnimes;
+    return processedPayloads;
   }
 
   async getEpisodeDanmu(id) {
@@ -942,8 +950,13 @@ export default class IqiyiSource extends BaseSource {
       }
     }
 
-    const { brotliDecompressSync } = await import("node:zlib");
-    return new Uint8Array(brotliDecompressSync(bytes));
+    if (typeof globalThis !== "undefined" && globalThis.process?.versions?.node) {
+      const importNodeModule = Function("specifier", "return import(specifier)");
+      const { brotliDecompressSync } = await importNodeModule("node:zlib");
+      return new Uint8Array(brotliDecompressSync(bytes));
+    }
+
+    throw new Error("当前环境不支持 Brotli 解压");
   }
 
   _parseIqiyiXmlDanmu(xml) {

@@ -13,18 +13,32 @@ export const Globals = {
   accessedEnvVars: {},
 
   // 静态常量
-  VERSION: '1.19.6',
+  VERSION: '1.19.8',
   MAX_LOGS: 1000, // 日志存储，最多保存 1000 行
+  MAX_ANIMES: 100,
   MAX_RECORDS: 100, // 请求记录最大数量
 
   // 运行时状态
   animes: [],
   episodeIds: [],
+  episodeIdByKey: new Map(), // episodeIds 旁路索引：normalize(url)+title -> episode
+  episodeById: new Map(), // episodeIds 旁路索引：commentId -> episode
+  animeByIdentity: new Map(), // animes 旁路索引：animeId/bangumiId(+source) -> anime
+  animeIndexByIdentity: new Map(), // animes 旁路索引：animeId/bangumiId(+source) -> index
+  animeLinkByCommentId: new Map(), // animes links 旁路索引：commentId -> { anime, link, linkIndex }
+  searchCacheKeyByNormalized: new Map(), // searchCache 旁路索引：normalized title/season key -> 实际 cache key
+  searchCacheKeyIndexRefs: null, // 记录 searchCache key 索引对应的 Map 引用和 size
+  runtimeCacheIndexRefs: null, // 记录索引对应的数组引用和长度，用于旧缓存/测试重置后自动重建
+  legacyRuntimeMigrationRefs: null, // 记录旧缓存迁移对应的数据引用和长度，避免每次查询重复全量迁移
   episodeNum: 10001, // 全局变量，用于自增 ID
   logBuffer: [],
   requestHistory: new Map(), // 记录每个 IP 地址的请求历史
+  animeDetailsCache: new Map(), // 番剧详情索引缓存，按 animeId 和 bangumiId 查找
+  episodeDetailsCache: new Map(), // 剧集详情索引缓存，按 commentId 查找
+  lazyDetailDescriptors: new Map(), // lazy 搜索详情描述符，仅运行时保存，按 source:id 查找
   localCacheValid: false, // 本地缓存是否生效
   localCacheInitialized: false, // 本地缓存是否已初始化
+  localRedisCacheInitialized: false, // 本地Redis缓存是否已初始化
   redisValid: false, // redis是否生效
   localRedisValid: false, // 本地redis是否生效
   aiValid: false, // AI配置是否生效
@@ -40,7 +54,7 @@ export const Globals = {
     reqRecords: null,
     todayReqNum: null
   },
-  searchCache: new Map(), // 搜索结果缓存，存储格式：{ keyword: { results, timestamp } }
+  searchCache: new Map(), // 搜索结果缓存，存储格式：{ keyword: { results, details, timestamp } }
   commentCache: new Map(), // 弹幕缓存，存储格式：{ videoUrl: { comments, timestamp } }
   deployPlatform: '', // 部署平台配置
   currentToken: '', // 标识当前可用token
@@ -105,6 +119,9 @@ export const Globals = {
       } else if (conf.startsWith('bilibili@') && hostname.includes('bilibili')) {
          specificProxy = conf.substring(9);
          break;
+      } else if (conf.startsWith('animeko@') && (hostname.includes('animeko') || hostname.includes('bgm.tv') || hostname.includes('openani.org') || hostname.includes('myani.org'))) {
+         specificProxy = conf.substring(8);
+         break;
       } else if (conf.startsWith('@') && !universalProxy) {
          universalProxy = conf.substring(1);
       } else if (!conf.includes('@') && !forwardProxy) {
@@ -135,9 +152,12 @@ export const Globals = {
         return `${cleanProxy}/${targetUrl}`;
     }
 
-    // 3. 正向代理 (仅本地环境回退到 5321 中转)
+    // 3. 正向代理仅在本地 Node 运行时可用（依赖 5321 中转服务）
     if (forwardProxy) {
-        return `http://127.0.0.1:5321/proxy?url=${encodeURIComponent(targetUrl)}`;
+        if (this.deployPlatform === 'node') {
+          return `http://127.0.0.1:5321/proxy?url=${encodeURIComponent(targetUrl)}`;
+        }
+        return targetUrl;
     }
 
     return targetUrl;
@@ -163,7 +183,7 @@ export const Globals = {
         // 映射大写常量到小写
         if (prop === 'version') return self.VERSION;
         if (prop === 'maxLogs') return self.MAX_LOGS;
-        if (prop === 'maxAnimes') return self.envs.MAX_ANIMES;
+        if (prop === 'maxAnimes') return self.envs.MAX_ANIMES ?? self.MAX_ANIMES;
         if (prop === 'maxRecords') return self.MAX_RECORDS;
         if (prop === 'maxLastSelectMap') return self.MAX_LAST_SELECT_MAP;
 

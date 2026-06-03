@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "pako": "npm:pako@2.1.0",
+    "node-fetch": "npm:node-fetch@3.3.2",
+    "redis": "npm:redis@5.11.0",
+    "dotenv": "npm:dotenv@16.4.7",
+    "chokidar": "npm:chokidar@4.0.3",
+    "https-proxy-agent": "npm:https-proxy-agent@7.0.6",
+    "fs": "node:fs",
+    "path": "node:path",
+    "url": "node:url",
+    "crypto": "node:crypto"
+  }
+}

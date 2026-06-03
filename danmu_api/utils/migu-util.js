@@ -10,11 +10,7 @@
  *   - key: Optional Base64 encoded key (uses WASM default if not provided)
  */
 
-import { stringToUtf8Bytes, utf8BytesToString } from "./codec-util.js";
-
-// =====================
-// 咪咕解码工具
-// =====================
+import { stringToUtf8Bytes, utf8BytesToString } from "./crypto-util.js";
 
 // WASM binary embedded as base64 (from gateway-crypto.wasm)
 const WASM_BASE64 = `

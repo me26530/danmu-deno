@@ -10,36 +10,99 @@ const DEFAULT_USER_AGENT = (
   "Chrome/124.0.0 Safari/537.36"
 );
 
-export const AIYIFAN_SIGNING_CONFIG_TTL_MS = 60 * 1000;
+export const AIYIFAN_SIGNING_CONFIG_TTL_MS = 30 * 60 * 1000;
+export const AIYIFAN_SIGNING_PERSIST_TTL_MS = 24 * 60 * 60 * 1000;
 
-// 安全获取对象属性（替代可选链操作符）
+const AIYIFAN_SIGNING_CACHE_KEY = "aiyifanSigningConfig";
+const RUNTIME_JSON_FILE_CACHE_MODULE_PATH = "../runtime/json-file-cache.js";
+let runtimeJsonFileCacheModulePromise;
+
+function isNodeRuntimeAvailable() {
+  return Boolean(typeof process !== "undefined" && process.versions && process.versions.node);
+}
+
+function isNodeFileCacheEnabled() {
+  const deployPlatform = String(globals.deployPlatform || "").trim().toLowerCase();
+  const redisConfigured = Boolean(globals.localRedisUrl || (globals.redisUrl && globals.redisToken));
+  return isNodeRuntimeAvailable() && !redisConfigured && (deployPlatform === "node" || deployPlatform === "nodejs");
+}
+
+async function getRuntimeJsonFileCacheModule() {
+  if (runtimeJsonFileCacheModulePromise === undefined) {
+    runtimeJsonFileCacheModulePromise = import(RUNTIME_JSON_FILE_CACHE_MODULE_PATH)
+      .then(function(mod) {
+        return mod;
+      })
+      .catch(function() {
+        return null;
+      });
+  }
+
+  return runtimeJsonFileCacheModulePromise;
+}
+
 function safeGet(obj, path, defaultValue) {
-  if (obj == null) return defaultValue;
-  const keys = path.split('.');
+  if (obj == null) {
+    return defaultValue;
+  }
+
+  const keys = path.split(".");
   let result = obj;
+
   for (let i = 0; i < keys.length; i++) {
-    if (result == null) return defaultValue;
-    // 处理数组索引，如 config[0]
+    if (result == null) {
+      return defaultValue;
+    }
+
     const key = keys[i];
     const arrayMatch = key.match(/^(.+)\[(\d+)\]$/);
     if (arrayMatch) {
       const arrKey = arrayMatch[1];
       const index = parseInt(arrayMatch[2], 10);
       result = result[arrKey];
-      if (Array.isArray(result) && index < result.length) {
-        result = result[index];
-      } else {
+      if (!Array.isArray(result) || index >= result.length) {
         return defaultValue;
       }
-    } else {
-      result = result[key];
+      result = result[index];
+      continue;
     }
+
+    result = result[key];
   }
+
   return result !== undefined ? result : defaultValue;
 }
 
+function mergeObjects(base, extra) {
+  const result = {};
+  const sources = [base, extra];
+
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    if (!source) {
+      continue;
+    }
+
+    for (const key in source) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        result[key] = source[key];
+      }
+    }
+  }
+
+  return result;
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, "%20"));
+  } catch (error) {
+    return value;
+  }
+}
+
 function extractAssignedObjectLiteral(html, variableName) {
-  const assignmentPattern = new RegExp('\\b(?:var|let|const)\\s+' + variableName + '\\s*=\\s*');
+  const assignmentPattern = new RegExp("\\b(?:var|let|const)\\s+" + variableName + "\\s*=\\s*");
   const match = assignmentPattern.exec(html);
   if (!match) {
     return null;
@@ -100,8 +163,8 @@ function parseFallbackPConfig(html) {
 
   let privateKeys = [];
   try {
-    privateKeys = JSON.parse('[' + match[2] + ']');
-  } catch (e) {
+    privateKeys = JSON.parse("[" + match[2] + "]");
+  } catch (error) {
     return null;
   }
 
@@ -116,14 +179,13 @@ function parseFallbackPConfig(html) {
 }
 
 export function extractPConfigFromInjectJson(injectJson) {
-  // 使用安全获取替代可选链
-  const config = safeGet(injectJson, 'config[0]', null);
-  const pConfig = config ? config.pConfig : null;
-  
-  if (!pConfig) return null;
-  
-  const publicKey = pConfig.publicKey;
-  const privateKey = Array.isArray(pConfig.privateKey) ? pConfig.privateKey[0] : pConfig.privateKey;
+  const config = safeGet(injectJson, "config[0].pConfig", null);
+  if (!config) {
+    return null;
+  }
+
+  const publicKey = config.publicKey;
+  const privateKey = Array.isArray(config.privateKey) ? config.privateKey[0] : config.privateKey;
 
   if (!publicKey || !privateKey) {
     return null;
@@ -142,7 +204,7 @@ export function extractPConfigFromHtml(html) {
         return signingConfig;
       }
     } catch (error) {
-      log("warn", '[Aiyifan] 解析 injectJson 失败，回退到 pConfig 提取: ' + (error.message || '未知错误'));
+      log("warn", "[Aiyifan] 解析 injectJson 失败，回退到 pConfig 提取: " + ((error && error.message) || "未知错误"));
     }
   }
 
@@ -172,20 +234,37 @@ function splitQueryString(queryString) {
       const equalsIndex = pair.indexOf("=");
       const rawKey = equalsIndex === -1 ? pair : pair.slice(0, equalsIndex);
       const rawValue = equalsIndex === -1 ? "" : pair.slice(equalsIndex + 1);
-      
-      // 手动解码，替代 decodeURIComponent 的异常处理
-      function safeDecode(str) {
-        try {
-          return decodeURIComponent(str.replace(/\+/g, "%20"));
-        } catch (e) {
-          return str;
-        }
-      }
-      
-      const key = safeDecode(rawKey);
-      const value = safeDecode(rawValue);
+      const key = safeDecodeURIComponent(rawKey);
+      const value = safeDecodeURIComponent(rawValue);
       return [key, value];
     });
+}
+
+function getIterableEntries(input) {
+  if (!input || typeof input.entries !== "function") {
+    return null;
+  }
+
+  try {
+    const entries = input.entries();
+    if (Array.isArray(entries)) {
+      return entries;
+    }
+
+    if (entries && typeof entries.next === "function") {
+      const result = [];
+      let current = entries.next();
+      while (!current.done) {
+        result.push(current.value);
+        current = entries.next();
+      }
+      return result;
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
 }
 
 function getQueryEntries(input) {
@@ -211,37 +290,35 @@ function getQueryEntries(input) {
     return splitQueryString(queryString);
   }
 
-  // 移除 URLSearchParams 检查，统一按普通对象处理
-  if (typeof input === "object" && input !== null) {
-    // 如果 input 有 entries 方法且返回数组，使用它
-    if (typeof input.entries === "function") {
-      try {
-        var entries = input.entries();
-        if (Array.isArray(entries)) {
-          return entries;
-        }
-        // 处理迭代器情况
-        var result = [];
-        // 尝试作为 Map 或类似对象处理
-        if (typeof input.forEach === "function") {
-          input.forEach(function(value, key) {
-            result.push([key, normalizeQueryValue(value)]);
-          });
-          return result.filter(function(item) {
-            return item[1] !== null;
-          });
-        }
-      } catch (e) {
-        // 失败则回退到 Object.entries
-      }
-    }
-    
-    // 标准对象处理
-    return Object.keys(input).map(function(key) {
-      return [key, normalizeQueryValue(input[key])];
-    }).filter(function(item) {
+  const iterableEntries = getIterableEntries(input);
+  if (iterableEntries) {
+    return iterableEntries
+      .map(function(item) {
+        return [item[0], normalizeQueryValue(item[1])];
+      })
+      .filter(function(item) {
+        return item[1] !== null;
+      });
+  }
+
+  if (typeof input.forEach === "function") {
+    const result = [];
+    input.forEach(function(value, key) {
+      result.push([key, normalizeQueryValue(value)]);
+    });
+    return result.filter(function(item) {
       return item[1] !== null;
     });
+  }
+
+  if (typeof input === "object") {
+    return Object.keys(input)
+      .map(function(key) {
+        return [key, normalizeQueryValue(input[key])];
+      })
+      .filter(function(item) {
+        return item[1] !== null;
+      });
   }
 
   return [];
@@ -271,69 +348,315 @@ function normalizeJsonPayload(data) {
   return data;
 }
 
-function isSignedRequestSuccessful(payload) {
-  // 使用安全获取替代可选链
-  var ret = safeGet(payload, 'ret', null);
-  var code = safeGet(payload, 'data.code', null);
-  return ret === 200 && code === 0;
+function isValidSigningConfig(config) {
+  return Boolean(config && config.publicKey && config.privateKey);
 }
 
-function getFailureMessage(payload, status) {
-  // 使用安全获取替代可选链
-  var msg = safeGet(payload, 'data.msg', null) || safeGet(payload, 'msg', null);
-  return msg || ('HTTP ' + status);
+function normalizeSigningCacheRecord(record) {
+  if (!record) {
+    return null;
+  }
+
+  if (typeof record === "string") {
+    try {
+      return normalizeSigningCacheRecord(JSON.parse(record));
+    } catch (error) {
+      return null;
+    }
+  }
+
+  if (isValidSigningConfig(record)) {
+    return {
+      signingConfig: {
+        publicKey: record.publicKey,
+        privateKey: record.privateKey
+      },
+      fetchedAt: Number(record.fetchedAt || 0) || 0
+    };
+  }
+
+  if (isValidSigningConfig(record.signingConfig)) {
+    return {
+      signingConfig: {
+        publicKey: record.signingConfig.publicKey,
+        privateKey: record.signingConfig.privateKey
+      },
+      fetchedAt: Number(record.fetchedAt || record.signingConfigFetchedAt || 0) || 0
+    };
+  }
+
+  return null;
+}
+
+function defaultIsResponseSuccessful(payload) {
+  return safeGet(payload, "ret", null) === 200 && safeGet(payload, "data.code", null) === 0;
+}
+
+function defaultGetFailureMessage(payload, status) {
+  return safeGet(payload, "data.msg", null) || safeGet(payload, "msg", null) || ("HTTP " + status);
 }
 
 export class AiyifanSigningProvider {
   constructor(options) {
     options = options || {};
-    this.proxyUrlBuilder = options.proxyUrlBuilder || function(url) { 
-      return globals.makeProxyUrl(url); 
+    this.request = options.request || httpGet;
+    this.proxyUrlBuilder = options.proxyUrlBuilder || function(url) {
+      return globals.makeProxyUrl(url);
     };
     this.userAgent = options.userAgent || DEFAULT_USER_AGENT;
     this.configPageUrl = options.configPageUrl || DEFAULT_CONFIG_PAGE_URL;
     this.ttlMs = options.ttlMs || AIYIFAN_SIGNING_CONFIG_TTL_MS;
-    this.now = options.now || function() { return Date.now(); };
+    this.persistentTtlMs = options.persistentTtlMs || AIYIFAN_SIGNING_PERSIST_TTL_MS;
+    this.now = options.now || function() {
+      return Date.now();
+    };
+    this.getConfigHeaders = options.getConfigHeaders || function() {
+      return {};
+    };
+    this.isResponseSuccessful = options.isResponseSuccessful || defaultIsResponseSuccessful;
+    this.getFailureMessage = options.getFailureMessage || defaultGetFailureMessage;
+    this.fileCachePath = options.fileCachePath || "";
+    this.getPersistentCache = options.getPersistentCache || this.readPersistentCache.bind(this);
+    this.setPersistentCache = options.setPersistentCache || this.writePersistentCache.bind(this);
     this.signingConfig = null;
     this.signingConfigFetchedAt = 0;
   }
 
+  async resolveFileCachePath() {
+    if (this.fileCachePath) {
+      return this.fileCachePath;
+    }
+
+    const fileCacheModule = await getRuntimeJsonFileCacheModule();
+    if (!fileCacheModule || typeof fileCacheModule.resolveCacheFilePathFromModuleUrl !== "function") {
+      return "";
+    }
+
+    return fileCacheModule.resolveCacheFilePathFromModuleUrl(import.meta.url, AIYIFAN_SIGNING_CACHE_KEY);
+  }
+
+  async readFileCache() {
+    if (!isNodeFileCacheEnabled()) {
+      return null;
+    }
+
+    try {
+      const fileCacheModule = await getRuntimeJsonFileCacheModule();
+      if (!fileCacheModule || typeof fileCacheModule.readJsonFileCache !== "function") {
+        return null;
+      }
+
+      const fileCachePath = await this.resolveFileCachePath();
+      if (!fileCachePath) {
+        return null;
+      }
+
+      return normalizeSigningCacheRecord(fileCacheModule.readJsonFileCache(fileCachePath));
+    } catch (error) {
+      log("warn", "[Aiyifan] 读取本地签名缓存文件失败: " + ((error && error.message) || "未知错误"));
+      return null;
+    }
+  }
+
+  async writeFileCache(record) {
+    if (!isNodeFileCacheEnabled()) {
+      return;
+    }
+
+    const normalized = normalizeSigningCacheRecord(record);
+    if (!normalized) {
+      return;
+    }
+
+    try {
+      const fileCacheModule = await getRuntimeJsonFileCacheModule();
+      if (!fileCacheModule || typeof fileCacheModule.writeJsonFileCache !== "function") {
+        return;
+      }
+
+      const fileCachePath = await this.resolveFileCachePath();
+      if (!fileCachePath) {
+        return;
+      }
+
+      const payload = {
+        publicKey: normalized.signingConfig.publicKey,
+        privateKey: normalized.signingConfig.privateKey,
+        fetchedAt: normalized.fetchedAt || this.now()
+      };
+      fileCacheModule.writeJsonFileCache(fileCachePath, payload);
+    } catch (error) {
+      log("warn", "[Aiyifan] 写入本地签名缓存文件失败: " + ((error && error.message) || "未知错误"));
+    }
+  }
+
+  isPersistentRecordFresh(record) {
+    if (!record || !record.fetchedAt) {
+      return true;
+    }
+
+    return (this.now() - record.fetchedAt) < this.persistentTtlMs;
+  }
+
+  async readPersistentCache() {
+    const stores = [];
+
+    if (globals.localRedisUrl) {
+      stores.push(async () => {
+        const { getLocalRedisKey } = await import("./local-redis-util.js");
+        return await getLocalRedisKey(AIYIFAN_SIGNING_CACHE_KEY);
+      });
+    }
+
+    if (globals.redisUrl && globals.redisToken) {
+      stores.push(async () => {
+        const { getRedisKey } = await import("./redis-util.js");
+        const result = await getRedisKey(AIYIFAN_SIGNING_CACHE_KEY);
+        if (result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "result")) {
+          return result.result;
+        }
+        if (Array.isArray(result)) {
+          return result[0];
+        }
+        return result;
+      });
+    }
+
+    if (stores.length === 0 && isNodeFileCacheEnabled()) {
+      stores.push(async () => {
+        return await this.readFileCache();
+      });
+    }
+
+    for (let i = 0; i < stores.length; i++) {
+      try {
+        const raw = await stores[i]();
+        const normalized = normalizeSigningCacheRecord(raw);
+        if (normalized) {
+          return normalized;
+        }
+      } catch (error) {
+        log("warn", "[Aiyifan] 读取持久签名缓存失败: " + ((error && error.message) || "未知错误"));
+      }
+    }
+
+    return null;
+  }
+
+  async writePersistentCache(record) {
+    const normalized = normalizeSigningCacheRecord(record);
+    if (!normalized) {
+      return;
+    }
+
+    const ttlSeconds = Math.max(60, Math.floor(this.persistentTtlMs / 1000));
+    const payload = {
+      publicKey: normalized.signingConfig.publicKey,
+      privateKey: normalized.signingConfig.privateKey,
+      fetchedAt: normalized.fetchedAt || this.now()
+    };
+    const writers = [];
+
+    if (globals.localRedisUrl) {
+      writers.push(async () => {
+        const { setLocalRedisKeyWithExpiry } = await import("./local-redis-util.js");
+        return await setLocalRedisKeyWithExpiry(AIYIFAN_SIGNING_CACHE_KEY, payload, ttlSeconds);
+      });
+    }
+
+    if (globals.redisUrl && globals.redisToken) {
+      writers.push(async () => {
+        const { setRedisKeyWithExpiry } = await import("./redis-util.js");
+        return await setRedisKeyWithExpiry(AIYIFAN_SIGNING_CACHE_KEY, payload, ttlSeconds);
+      });
+    }
+
+    if (writers.length === 0 && isNodeFileCacheEnabled()) {
+      writers.push(async () => {
+        return await this.writeFileCache(payload);
+      });
+    }
+
+    for (let i = 0; i < writers.length; i++) {
+      try {
+        await writers[i]();
+      } catch (error) {
+        log("warn", "[Aiyifan] 写入持久签名缓存失败: " + ((error && error.message) || "未知错误"));
+      }
+    }
+  }
+
   async getSigningConfig(forceRefresh) {
     forceRefresh = forceRefresh || false;
-    var now = this.now();
-    var cacheValid = this.signingConfig && (now - this.signingConfigFetchedAt) < this.ttlMs;
+    const now = this.now();
+    const cacheValid = this.signingConfig && (now - this.signingConfigFetchedAt) < this.ttlMs;
 
     if (!forceRefresh && cacheValid) {
       return this.signingConfig;
     }
 
-    var response = await httpGet(this.proxyUrlBuilder(this.configPageUrl), {
-      headers: {
-        "User-Agent": this.userAgent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    let persistentRecord = null;
+    if (typeof this.getPersistentCache === "function") {
+      persistentRecord = normalizeSigningCacheRecord(await this.getPersistentCache());
+      if (!forceRefresh && persistentRecord && this.isPersistentRecordFresh(persistentRecord)) {
+        this.signingConfig = persistentRecord.signingConfig;
+        this.signingConfigFetchedAt = persistentRecord.fetchedAt || now;
+        log("info", "[Aiyifan] 使用持久签名缓存恢复 pConfig");
+        return this.signingConfig;
       }
-    });
-
-    var html = typeof response.data === "string" ? response.data : String(response.data || "");
-    var signingConfig = extractPConfigFromHtml(html);
-    if (!signingConfig) {
-      throw new Error("未能从桌面站页面解析到 pConfig");
     }
 
-    this.signingConfig = signingConfig;
-    this.signingConfigFetchedAt = now;
-    log("info", '[Aiyifan] 已更新桌面站签名配置: ' + signingConfig.publicKey.slice(0, 12) + '...');
-    return signingConfig;
+    try {
+      const headers = mergeObjects(
+        {
+          "User-Agent": this.userAgent,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        },
+        this.getConfigHeaders() || {}
+      );
+
+      const response = await this.request(this.proxyUrlBuilder(this.configPageUrl), { headers });
+      const html = typeof response.data === "string"
+        ? response.data
+        : String(response && response.data != null ? response.data : "");
+      const signingConfig = extractPConfigFromHtml(html);
+      if (!signingConfig) {
+        throw new Error("未能从桌面站页面解析到 pConfig");
+      }
+
+      this.signingConfig = signingConfig;
+      this.signingConfigFetchedAt = now;
+      if (typeof this.setPersistentCache === "function") {
+        await this.setPersistentCache({ signingConfig, fetchedAt: now });
+      }
+      log("info", "[Aiyifan] 已更新桌面站签名配置: " + signingConfig.publicKey.slice(0, 12) + "...");
+      return signingConfig;
+    } catch (error) {
+      const fallbackRecord = normalizeSigningCacheRecord({
+        signingConfig: this.signingConfig,
+        fetchedAt: this.signingConfigFetchedAt
+      }) || persistentRecord;
+
+      if (fallbackRecord && isValidSigningConfig(fallbackRecord.signingConfig)) {
+        this.signingConfig = fallbackRecord.signingConfig;
+        this.signingConfigFetchedAt = fallbackRecord.fetchedAt || this.signingConfigFetchedAt || now;
+        log("warn", "[Aiyifan] 刷新 pConfig 失败，继续使用旧签名配置: " + ((error && error.message) || "未知错误"));
+        return this.signingConfig;
+      }
+
+      throw error;
+    }
   }
 
   buildSignedParams(baseParams, signingConfig) {
-    var result = {};
-    // 手动复制对象，替代展开运算符
-    for (var key in baseParams) {
-      if (baseParams.hasOwnProperty(key)) {
+    const result = {};
+
+    for (const key in baseParams) {
+      if (Object.prototype.hasOwnProperty.call(baseParams, key)) {
         result[key] = baseParams[key];
       }
     }
+
     result.vv = computeAiyifanVv(baseParams, signingConfig);
     result.pub = signingConfig.publicKey;
     return result;
@@ -343,31 +666,30 @@ export class AiyifanSigningProvider {
     headers = headers || {};
     logPrefix = logPrefix || "Aiyifan";
     forceRefresh = forceRefresh || false;
-    
-    var signingConfig = await this.getSigningConfig(forceRefresh);
-    var signedParams = this.buildSignedParams(baseParams, signingConfig);
-    var requestUrl = updateQueryString(api, signedParams);
-    var response = await httpGet(this.proxyUrlBuilder(requestUrl), { headers: headers });
 
-    var payload;
+    const signingConfig = await this.getSigningConfig(forceRefresh);
+    const signedParams = this.buildSignedParams(baseParams, signingConfig);
+    const requestUrl = updateQueryString(api, signedParams);
+    const response = await this.request(this.proxyUrlBuilder(requestUrl), { headers });
+    const status = response && response.status != null ? response.status : 200;
+
+    let payload;
     try {
       payload = normalizeJsonPayload(response.data);
     } catch (error) {
       if (!forceRefresh) {
-        log("warn", '[' + logPrefix + '] 响应无法解析为 JSON，刷新签名配置后重试: ' + (error.message || '未知错误'));
+        log("warn", "[" + logPrefix + "] 响应无法解析为 JSON，刷新签名配置后重试: " + ((error && error.message) || "未知错误"));
         return this.signedGetJson(api, baseParams, headers, logPrefix, true);
       }
       throw error;
     }
 
-    // 安全获取状态码，如果不存在则默认为200
-    var statusCode = response.status != null ? response.status : 200;
-    if (statusCode !== 200 || !isSignedRequestSuccessful(payload)) {
+    if (status !== 200 || !this.isResponseSuccessful(payload)) {
       if (!forceRefresh) {
-        log("warn", '[' + logPrefix + '] 当前签名请求失败，刷新 pConfig 后重试: ' + getFailureMessage(payload, statusCode));
+        log("warn", "[" + logPrefix + "] 当前签名请求失败，刷新 pConfig 后重试: " + this.getFailureMessage(payload, status));
         return this.signedGetJson(api, baseParams, headers, logPrefix, true);
       }
-      throw new Error(getFailureMessage(payload, statusCode));
+      throw new Error(this.getFailureMessage(payload, status));
     }
 
     return {

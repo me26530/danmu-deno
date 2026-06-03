@@ -1,0 +1,84 @@
+name: Build and Push Docker Image to Docker Hub
+
+on:
+  workflow_dispatch:  # 手动触发
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Build forward widget bundle
+        run: npm run build-forward-widget
+
+      # 从 danmu_api/configs/globals.js 中读取版本号
+      - name: Read version from globals.js
+        id: version
+        run: |
+          VERSION=$(sed -nE "s/^  VERSION: '([^']+)'.*/\1/p" danmu_api/configs/globals.js | head -n 1)
+          if [ -z "$VERSION" ]; then
+            echo "Failed to read VERSION from danmu_api/configs/globals.js" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Set version suffix
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "VERSION_TAG=${{ env.VERSION }}-test" >> $GITHUB_ENV
+          else
+            echo "VERSION_TAG=${{ env.VERSION }}" >> $GITHUB_ENV
+          fi
+
+      # 先登录，再初始化 Buildx，避免拉取 BuildKit 镜像时触发匿名限速
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Pull BuildKit image
+        run: docker pull moby/buildkit:buildx-stable-1
+
+      # 设置 Docker 镜像缓存（可选,加速构建）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 构建 Docker 镜像,并指定平台为 amd64 和 arm64,推送到 Docker Hub
+      # 使用单条命令同时指定两个标签,避免重复构建
+      - name: Build and Push Docker image with version and latest tag
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            docker buildx build --platform linux/amd64,linux/arm64 \
+              -t ${{ secrets.DOCKER_USERNAME }}/danmu-api:${{ env.VERSION_TAG }} \
+              -t ${{ secrets.DOCKER_USERNAME }}/danmu-api:latest \
+              --push .
+          else
+            docker buildx build --platform linux/amd64,linux/arm64 \
+              -t ${{ secrets.DOCKER_USERNAME }}/danmu-api:${{ env.VERSION_TAG }} \
+              --push .
+          fi

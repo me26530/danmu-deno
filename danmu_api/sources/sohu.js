@@ -5,8 +5,9 @@ import { httpGet, buildQueryString } from "../utils/http-util.js";
 import { convertToAsciiSum } from "../utils/codec-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
-import { printFirst200Chars, titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { preferSeasonCandidatesIfPresent, printFirst200Chars, resolveQuerySeason, titleMatches } from "../utils/common-util.js";
 import { SegmentListResponse } from '../models/dandan-model.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取搜狐视频弹幕
@@ -34,12 +35,11 @@ export default class SohuSource extends BaseSource {
       return null;
     }
 
-    // 过滤仅预告片结果 通过 is_trailer 字段判断 (1 为预告片)
+    // 过滤预告片
     if (item.is_trailer === 1) {
       return null;
     }
 
-    // 过滤仅预告片结果 通过角标文字判断 (corner_mark.text 为 "预告")
     if (item.corner_mark && item.corner_mark.text === '预告') {
       return null;
     }
@@ -51,20 +51,17 @@ export default class SohuSource extends BaseSource {
     // meta格式: ["20集全", "电视剧 | 内地 | 2018年", "主演：..."]
     let categoryName = null;
     if (item.meta && Array.isArray(item.meta)) {
-      // 遍历 meta 数组，寻找包含 "|" 的条目 (例如: "电视剧 | 美国 | 2018年")
       for (const metaData of item.meta) {
         if (metaData.txt && metaData.txt.includes('|')) {
           const parts = metaData.txt.split('|');
           if (parts.length > 0) {
             const firstPart = parts[0].trim();
-            // 额外处理：如果第一部分是 "别名：XXX"，则取第二部分
-            // (例如 "别名：铁面无私包公 | 电影 | ...")
             if (firstPart.includes('别名') && parts.length > 1) {
-               categoryName = parts[1].trim();
+              categoryName = parts[1].trim();
             } else {
-               categoryName = firstPart;
+              categoryName = firstPart;
             }
-            break; // 找到后立即停止
+            break;
           }
         }
       }
@@ -195,7 +192,7 @@ export default class SohuSource extends BaseSource {
       const videosData = data.videos || [];
 
       if (!videosData || videosData.length === 0) {
-        log("warning", `搜狐视频: 未找到分集列表 (media_id=${id})`);
+        log("info", `搜狐视频: 未找到分集列表 (media_id=${id})`);
         return [];
       }
 
@@ -240,15 +237,7 @@ export default class SohuSource extends BaseSource {
     }
   }
 
-  /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map|null} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
-   */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {
     const tmpAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
@@ -257,28 +246,15 @@ export default class SohuSource extends BaseSource {
       return [];
     }
 
-    // 基础标题与季度匹配过滤
-    let filteredAnimes = sourceAnimes.filter(s => titleMatches(s.title, queryTitle, querySeason));
-
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const s = extractSeasonNumberFromAnimeTitle(anime.title).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[Sohu] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
     // 使用 map 和 async 时需要返回 Promise 数组，并等待所有 Promise 完成
-    const processSohuAnimes = await Promise.all(filteredAnimes.map(async (anime) => {
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.title || '');
+
+    const matchedAnimes = seasonPreferredAnimes.filter(s => titleMatches(s.title, queryTitle));
+    const processedPayloads = await mapWithConcurrency(
+      matchedAnimes,
+      resolveSourceConcurrency('sohu', globals),
+      async (anime) => {
         try {
           const eps = await this.getEpisodes(anime.mediaId);
           let links = [];
@@ -295,38 +271,43 @@ export default class SohuSource extends BaseSource {
             });
           }
 
-          if (links.length > 0) {
-            // 将字符串mediaId转换为数字ID (使用哈希函数)
-            const numericAnimeId = convertToAsciiSum(anime.mediaId);
-            let transformedAnime = {
-              animeId: numericAnimeId,
-              bangumiId: anime.mediaId,
-              animeTitle: `${anime.title}(${anime.year || new Date().getFullYear()})【${anime.type}】from sohu`,
-              type: anime.type,
-              typeDescription: anime.type,
-              imageUrl: anime.imageUrl,
-              startDate: generateValidStartDate(anime.year || new Date().getFullYear()),
-              episodeCount: links.length,
-              rating: 0,
-              isFavorited: true,
-              source: "sohu",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
+          // 将字符串mediaId转换为数字ID (使用哈希函数)
+          const numericAnimeId = convertToAsciiSum(anime.mediaId);
+          const transformedAnime = {
+            animeId: numericAnimeId,
+            bangumiId: anime.mediaId,
+            animeTitle: `${anime.title}(${anime.year || new Date().getFullYear()})【${anime.type}】from sohu`,
+            type: anime.type,
+            typeDescription: anime.type,
+            imageUrl: anime.imageUrl,
+            startDate: generateValidStartDate(anime.year || new Date().getFullYear()),
+            episodeCount: links.length,
+            rating: 0,
+            isFavorited: true,
+            source: "sohu",
+          };
 
-            addAnime({...transformedAnime, links: links}, detailStore);
-
-            if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
-          }
+          return { transformedAnime, links };
         } catch (error) {
           log("error", `[Sohu] Error processing anime: ${error.message}`);
+          return null;
         }
-      })
+      }
     );
+
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      const { transformedAnime, links } = payload;
+      tmpAnimes.push(transformedAnime);
+      addAnime({ ...transformedAnime, links }, detailStore);
+      if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
+    }
 
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
 
-    return processSohuAnimes;
+    return processedPayloads;
   }
 
   async getEpisodeDuration(aid, vid) {

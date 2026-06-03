@@ -1,7 +1,9 @@
 import BaseSource from './base.js';
 import { log } from "../utils/log-util.js";
 import { getDoubanDetail, searchDoubanTitles, searchDoubanTitlesByPublic } from "../utils/douban-util.js";
-import { titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { preferSeasonCandidatesIfPresent, resolveQuerySeason } from "../utils/common-util.js";
+import { globals } from '../configs/globals.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取豆瓣源播放链接
@@ -21,20 +23,24 @@ export default class DoubanSource extends BaseSource {
       let response = await searchDoubanTitles(keyword);
       let data = response?.data;
 
-      // 兜底策略：如果 searchDoubanTitles 失败或返回空结果，使用 searchDoubanTitlesByPublic
+      // 兜底策略：search 失败、空结果、或 subjects/smart_box 都为空时，回退到公开 API
       if (!data || (!data?.subjects?.items?.length && !data?.smart_box?.length)) {
         log("info", "searchDoubanTitles failed or empty, trying searchDoubanTitlesByPublic");
         const fallbackResponse = await searchDoubanTitlesByPublic(keyword);
         const fallbackData = fallbackResponse?.data;
 
         if (fallbackData?.subjects?.length > 0) {
-          // 将 searchDoubanTitlesByPublic 返回的数据转换为原格式
           data = {
             subjects: {
               items: fallbackData.subjects.map(item => this.convertToOriginalFormat(item)),
             }
           };
         }
+      }
+
+      if (!data) {
+        log("error", "[Douban] search response is null after fallback");
+        return [];
       }
 
       let tmpAnimes = [];
@@ -113,15 +119,12 @@ export default class DoubanSource extends BaseSource {
 
   async getEpisodes(id) {}
 
-  /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
-   */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, options = {}, legacyDetailStore = null) {
+    const handleOptions = legacyDetailStore instanceof Map
+      ? { ...(options && !(options instanceof Map) ? options : {}), detailStore: legacyDetailStore }
+      : options instanceof Map
+        ? { detailStore: options }
+        : (options || {});
     const doubanAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
@@ -130,42 +133,25 @@ export default class DoubanSource extends BaseSource {
       return [];
     }
 
-    // 基础标题与季度匹配过滤
-    let filteredAnimes = sourceAnimes.filter(anime => {
-      const titleToCheck = anime?.target?.title || "";
-      return titleMatches(titleToCheck, queryTitle, querySeason);
-    });
+    const querySeason = resolveQuerySeason(queryTitle, handleOptions);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime?.target?.title || anime?.title || '');
 
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const titleToCheck = anime?.target?.title || "";
-        const s = extractSeasonNumberFromAnimeTitle(titleToCheck).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[Douban] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
-    const processDoubanAnimes = await Promise.allSettled(filteredAnimes.map(async (anime) => {
+    const processDoubanAnimes = await mapWithConcurrency(
+      seasonPreferredAnimes,
+      resolveSourceConcurrency('douban', globals),
+      async (anime) => {
       try {
-        if (anime?.layout !== "subject") return;
+        if (anime?.layout !== "subject") return [];
         const doubanId = anime.target_id;
         let animeType = anime?.type_name;
-        if (animeType !== "电影" && animeType !== "电视剧") return;
+        if (animeType !== "电影" && animeType !== "电视剧") return [];
         log("info", "doubanId: ", doubanId, anime?.target?.title, animeType);
 
         // 获取平台详情页面url
         const response = await getDoubanDetail(doubanId);
 
         const results = [];
+        const localDoubanAnimes = [];
 
         for (const vendor of response.data?.vendors ?? []) {
           if (!vendor) {
@@ -213,7 +199,7 @@ export default class DoubanSource extends BaseSource {
               if (cid) {
                 tmpAnimes[0].provider = "tencent";
                 tmpAnimes[0].mediaId = cid;
-                await this.tencentSource.handleAnimes(tmpAnimes, response.data?.title, doubanAnimes, detailStore, querySeason)
+                await this.tencentSource.handleAnimes(tmpAnimes, response.data?.title, localDoubanAnimes, handleOptions)
               }
               break;
             }
@@ -222,7 +208,7 @@ export default class DoubanSource extends BaseSource {
               if (tvid) {
                 tmpAnimes[0].provider = "iqiyi";
                 tmpAnimes[0].mediaId = anime?.type_name === '电影' ? `movie_${tvid}` : tvid;
-                await this.iqiyiSource.handleAnimes(tmpAnimes, response.data?.title, doubanAnimes, detailStore, querySeason)
+                await this.iqiyiSource.handleAnimes(tmpAnimes, response.data?.title, localDoubanAnimes, handleOptions)
               }
               break;
             }
@@ -231,7 +217,7 @@ export default class DoubanSource extends BaseSource {
               if (showId) {
                 tmpAnimes[0].provider = "youku";
                 tmpAnimes[0].mediaId = showId;
-                await this.youkuSource.handleAnimes(tmpAnimes, response.data?.title, doubanAnimes, detailStore, querySeason)
+                await this.youkuSource.handleAnimes(tmpAnimes, response.data?.title, localDoubanAnimes, handleOptions)
               }
               break;
             }
@@ -240,32 +226,39 @@ export default class DoubanSource extends BaseSource {
               if (seasonId) {
                 tmpAnimes[0].provider = "bilibili";
                 tmpAnimes[0].mediaId = `ss${seasonId}`;
-                await this.bilibiliSource.handleAnimes(tmpAnimes, response.data?.title, doubanAnimes, detailStore, querySeason)
+                await this.bilibiliSource.handleAnimes(tmpAnimes, response.data?.title, localDoubanAnimes, handleOptions)
               }
               break;
             }
             case "miguvideo": {
               let epId = null;
               const decodeUrl = decodeURIComponent(vendor.uri);
-              const contentIdMatch = decodeUrl.match(/"contentID":"([^"]+)"/);
+              const contentIdMatch = decodeUrl.match(/\"contentID\":\"([^\"]+)\"/);
               if (contentIdMatch && contentIdMatch[1]) {
                 epId = contentIdMatch[1];
               }
               if (epId) {
                 tmpAnimes[0].provider = "migu";
                 tmpAnimes[0].mediaId = `https://v3-sc.miguvideo.com/program/v4/cont/content-info/${epId}/1`;
-                await this.miguSource.handleAnimes(tmpAnimes, response.data?.title, doubanAnimes, detailStore, querySeason)
+                await this.miguSource.handleAnimes(tmpAnimes, response.data?.title, localDoubanAnimes, handleOptions)
               }
               break;
             }
           }
         }
-        return results;
+        return localDoubanAnimes.length > 0 ? localDoubanAnimes : results;
       } catch (error) {
         log("error", `[Douban] Error processing anime: ${error.message}`);
         return [];
       }
-    }));
+      }
+    );
+
+    for (const sourceResults of processDoubanAnimes) {
+      if (Array.isArray(sourceResults)) {
+        doubanAnimes.push(...sourceResults);
+      }
+    }
 
     this.sortAndPushAnimesByYear(doubanAnimes, curAnimes);
     return processDoubanAnimes;

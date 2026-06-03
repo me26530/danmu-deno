@@ -5,12 +5,28 @@ import { httpGet, buildQueryString } from "../utils/http-util.js";
 import { convertToAsciiSum } from "../utils/codec-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
-import { printFirst200Chars, titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { preferSeasonCandidatesIfPresent, printFirst200Chars, resolveQuerySeason, titleMatches } from "../utils/common-util.js";
 import { SegmentListResponse } from '../models/dandan-model.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取西瓜视频弹幕
 // =====================
+
+function getHttpStatusFromError(error) {
+  if (!error || typeof error.message !== 'string') return null;
+  const match = error.message.match(/HTTP error!\s*status:\s*(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function getXiguaErrorLevel(error) {
+  const status = getHttpStatusFromError(error);
+  if (Number.isFinite(status) && status >= 400 && status < 500) {
+    return 'debug';
+  }
+  return 'warn';
+}
+
 class XiguaSource extends BaseSource {
   async search(keyword) {
     try {
@@ -31,7 +47,7 @@ class XiguaSource extends BaseSource {
 
       if (sectionMatch) {
         const sectionContent = sectionMatch[1]; // 获取s-long-video-card内的内容
-        
+
         // 使用正则表达式匹配每个视频条目
         const videoRegex = /<div class="s-long-video">[\s\S]*?(?=<div class="s-long-video">|$)/g;
         const videoCards = sectionContent.match(videoRegex) || [];
@@ -40,7 +56,7 @@ class XiguaSource extends BaseSource {
           // 提取URL
           const urlMatch = card.match(/href="(\/video\/\d+)"/);
           const url = urlMatch ? `https://m.ixigua.com${urlMatch[1]}` : '';
-          
+
           // 提取标题
           const titleMatch = card.match(/<h3 class="s-long-video-info-title">[\s\S]*?title="([^"]+)"/);
           const title = titleMatch ? titleMatch[1] : '';
@@ -54,18 +70,18 @@ class XiguaSource extends BaseSource {
           }
           // 替换HTML实体 &amp; 为 &
           img = img.replace(/&amp;/g, '&');
-          
+
           // 提取类型和年份 (格式: 电视剧/中国大陆/2006)
           const typeYearMatch = card.match(/<p>([^<]+\/[^<]+\/\d{4})<\/p>/);
           let type = '';
           let year = '';
-          
+
           if (typeYearMatch) {
             const parts = typeYearMatch[1].split('/');
             type = parts[0] || ''; // 电视剧
             year = parts[2] || ''; // 2006
           }
-          
+
           if (url && title) {
             animes.push({
               name: title,
@@ -85,12 +101,8 @@ class XiguaSource extends BaseSource {
       log("info", `[Xigua] 搜索找到 ${animes.length} 个有效结果`);
       return animes;
     } catch (error) {
-      // 捕获请求中的错误
-      log("error", "getXiguaAnimes error:", {
-        message: error.message,
-        name: error.name,
-        stack: error.stack,
-      });
+      // 搜索阶段偶发 4xx 属于可预期失败，降级避免刷屏
+      log(getXiguaErrorLevel(error), `[Xigua] 搜索失败: ${error.message}`);
       return [];
     }
   }
@@ -101,7 +113,7 @@ class XiguaSource extends BaseSource {
       // https://m.ixigua.com/video/6551333775337325060
       const itemId = id.split('/').pop();
       const detailUrl = `https://m.ixigua.com/video/${itemId}`;
-      
+
       const resp = await httpGet(detailUrl, {
         headers: {
           "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/603.1.30 (KHTML, like Gecko) Version/17.5 Mobile/15A5370a Safari/602.1"
@@ -117,12 +129,8 @@ class XiguaSource extends BaseSource {
       const match = resp.data.match(/"duration"\s*:\s*([\d.]+)/);
       return match ? parseFloat(match[1]) : 0;
     } catch (error) {
-      // 捕获请求中的错误
-      log("error", "getXiguaDetail error:", {
-        message: error.message,
-        name: error.name,
-        stack: error.stack,
-      });
+      // 详情页抓取失败可回退为无时长，避免堆栈刷屏
+      log(getXiguaErrorLevel(error), `[Xigua] 获取详情失败: ${error.message}`);
       return 0;
     }
   }
@@ -150,7 +158,7 @@ class XiguaSource extends BaseSource {
           // 提取并解析JSON数据
           const episodesJsonStr = episodesMatch[0].replace(/"episodes_list"\s*:\s*/, '');
           const episodes = JSON.parse(episodesJsonStr);
-          
+
           // 生成播放链接列表
           const playlistUrls = episodes.map(ep => ({
             seq_num: ep.seq_num,
@@ -159,10 +167,10 @@ class XiguaSource extends BaseSource {
             gid: ep.gid,
             cover_image_url: ep.cover_image_url
           }));
-          
+
           // 如果需要，可以返回或进一步处理这个列表
           return playlistUrls;
-          
+
         } catch (e) {
           log("error", '解析episodes_list失败:', e);
         }
@@ -171,55 +179,30 @@ class XiguaSource extends BaseSource {
         return [];
       }
     } catch (error) {
-      // 捕获请求中的错误
-      log("error", "getXiguaEposides error:", {
-        message: error.message,
-        name: error.name,
-        stack: error.stack,
-      });
+      // 剧集页 404 在旧链接中较常见，按可预期失败处理
+      log(getXiguaErrorLevel(error), `getXiguaEposides error: ${error.message}`);
       return [];
     }
   }
 
-  /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map|null} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
-   */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {
     const tmpAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
     if (!sourceAnimes || !Array.isArray(sourceAnimes)) {
-      log("error", "[Xigua] sourceAnimes is not a valid array");
+      log("warn", "[Xigua] sourceAnimes is not a valid array");
       return [];
     }
 
-    // 基础标题与季度匹配过滤
-    let filteredAnimes = sourceAnimes.filter(s => titleMatches(s.name, queryTitle, querySeason));
-
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const s = extractSeasonNumberFromAnimeTitle(anime.name).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[Xigua] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
     // 使用 map 和 async 时需要返回 Promise 数组，并等待所有 Promise 完成
-    const processXiguaAnimes = await Promise.all(filteredAnimes.map(async (anime) => {
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.name || anime.title || '');
+
+    const matchedAnimes = seasonPreferredAnimes.filter(s => titleMatches(s.name, queryTitle));
+    const processedPayloads = await mapWithConcurrency(
+      matchedAnimes,
+      resolveSourceConcurrency('xigua', globals),
+      async (anime) => {
         try {
           const albumId = anime.url.split('/').pop();
           const eps = await this.getEpisodes(albumId);
@@ -233,41 +216,45 @@ class XiguaSource extends BaseSource {
             });
           }
 
-          if (links.length > 0) {
-            let transformedAnime = {
-              animeId: convertToAsciiSum(albumId),
-              bangumiId: String(albumId),
-              animeTitle: `${anime.name}(${anime.year})【${anime.type}】from xigua`,
-              type: anime.type,
-              typeDescription: anime.type,
-              imageUrl: anime.img,
-              startDate: generateValidStartDate(anime.year),
-              episodeCount: links.length,
-              rating: 0,
-              isFavorited: true,
-              source: "xigua",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
+          const transformedAnime = {
+            animeId: convertToAsciiSum(albumId),
+            bangumiId: String(albumId),
+            animeTitle: `${anime.name}(${anime.year})【${anime.type}】from xigua`,
+            type: anime.type,
+            typeDescription: anime.type,
+            imageUrl: anime.img,
+            startDate: generateValidStartDate(anime.year),
+            episodeCount: links.length,
+            rating: 0,
+            isFavorited: true,
+            source: "xigua",
+          };
 
-            addAnime({...transformedAnime, links: links}, detailStore);
-
-            if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
-          }
+          return { anime: transformedAnime, links };
         } catch (error) {
-          log("error", `[Xigua] Error processing anime: ${error.message}`);
+          log("debug", `[Xigua] Error processing anime: ${error.message}`);
+          return null;
         }
-      })
+      }
     );
+
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      tmpAnimes.push(payload.anime);
+      addAnime({...payload.anime, links: payload.links}, detailStore);
+      if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
+    }
 
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
 
-    return processXiguaAnimes;
+    return processedPayloads;
   }
 
   async getEpisodeDanmu(id) {
     log("info", "开始从本地请求西瓜视频弹幕...", id);
-    
+
     // 获取弹幕分段数据
     const segmentResult = await this.getEpisodeDanmuSegments(id);
     if (!segmentResult || !segmentResult.segmentList || segmentResult.segmentList.length === 0) {
@@ -280,25 +267,25 @@ class XiguaSource extends BaseSource {
     // 并发请求所有弹幕段，限制并发数量为50
     const MAX_CONCURRENT = 100;
     const allComments = [];
-    
+
     // 将segmentList分批处理，每批最多MAX_CONCURRENT个请求
     for (let i = 0; i < segmentList.length; i += MAX_CONCURRENT) {
       const batch = segmentList.slice(i, i + MAX_CONCURRENT);
-      
+
       // 并发处理当前批次的请求
       const batchPromises = batch.map(segment => this.getEpisodeSegmentDanmu(segment));
       const batchResults = await Promise.allSettled(batchPromises);
-      
+
       // 处理结果
       for (let j = 0; j < batchResults.length; j++) {
         const result = batchResults[j];
         const segment = batch[j];
         const start = segment.segment_start;
         const end = segment.segment_end;
-        
+
         if (result.status === 'fulfilled') {
           const comments = result.value;
-          
+
           if (comments && comments.length > 0) {
             allComments.push(...comments);
           }
@@ -306,7 +293,7 @@ class XiguaSource extends BaseSource {
           log("error", `获取弹幕段失败 (${start}-${end}s):`, result.reason.message);
         }
       }
-      
+
       // 批次之间稍作延迟，避免过于频繁的请求
       if (i + MAX_CONCURRENT < segmentList.length) {
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -346,7 +333,7 @@ class XiguaSource extends BaseSource {
       });
 
       const danmuUrl = `https://ib.snssdk.com/vapp/danmaku/list/v1/?${danmuQueryString}`;
-      
+
       segmentList.push({
         "type": "xigua",
         "segment_start": segmentStart,

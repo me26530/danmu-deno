@@ -4,7 +4,9 @@ import { log } from "../utils/log-util.js";
 import { httpGet } from "../utils/http-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
 import { simplized } from "../utils/zh-util.js";
+import { preferSeasonCandidatesIfPresent, resolveQuerySeason } from "../utils/common-util.js";
 import { SegmentListResponse } from '../models/dandan-model.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取自定义源弹幕
@@ -91,9 +93,13 @@ export default class CustomSource extends BaseSource {
       return [];
     }
 
-    // 使用 map 和 async 时需要返回 Promise 数组，并等待所有 Promise 完成
-    const processCustomSourceAnimes = await Promise.all(sourceAnimes
-      .map(async (anime) => {
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.animeTitle || anime.title || '');
+
+    const processedPayloads = await mapWithConcurrency(
+      seasonPreferredAnimes,
+      resolveSourceConcurrency('custom', globals),
+      async (anime) => {
         try {
           const eps = await this.getEpisodes(anime.bangumiId);
           let links = [];
@@ -106,36 +112,41 @@ export default class CustomSource extends BaseSource {
             });
           }
 
-          if (links.length > 0) {
-            let transformedAnime = {
-              animeId: anime.animeId,
-              bangumiId: String(anime.bangumiId),
-              animeTitle: `${anime.animeTitle}(${new Date(anime.startDate).getFullYear()})【${anime.typeDescription}】from custom`,
-              type: anime.type,
-              typeDescription: anime.typeDescription,
-              imageUrl: anime.imageUrl,
-              startDate: anime.startDate,
-              episodeCount: links.length,
-              rating: anime.rating,
-              isFavorited: true,
-              source: "custom",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
+          const transformedAnime = {
+            animeId: anime.animeId,
+            bangumiId: String(anime.bangumiId),
+            animeTitle: `${anime.animeTitle}(${new Date(anime.startDate).getFullYear()})【${anime.typeDescription}】from custom`,
+            type: anime.type,
+            typeDescription: anime.typeDescription,
+            imageUrl: anime.imageUrl,
+            startDate: anime.startDate,
+            episodeCount: links.length,
+            rating: anime.rating,
+            isFavorited: true,
+            source: "custom",
+          };
 
-            addAnime({...transformedAnime, links: links}, detailStore);
-
-            if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
-          }
+          return { transformedAnime, links };
         } catch (error) {
           log("error", `[Custom Source] Error processing anime: ${error.message}`);
+          return null;
         }
-      })
+      }
     );
+
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      const { transformedAnime, links } = payload;
+      tmpAnimes.push(transformedAnime);
+      addAnime({ ...transformedAnime, links }, detailStore);
+      if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
+    }
 
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
 
-    return processCustomSourceAnimes;
+    return processedPayloads;
   }
 
   async getEpisodeDanmu(id) {

@@ -11,10 +11,13 @@ import { traditionalized } from './zh-util.js';
  * 对弹幕进行分组、去重和计数处理
  * @param {Array} filteredDanmus 已过滤屏蔽词的弹幕列表
  * @param {number} n 分组时间间隔（分钟），0表示不分组（除非多源合并强制去重）
- * @param {boolean} isMultiSource 是否为多源弹幕
  * @returns {Array} 处理后的弹幕列表
  */
 export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
+  if (isMultiSource) {
+    log("info", '[Smart Deduplication] Detected multi-source merged danmaku. Applying source-aware deduplication.');
+  }
+
   // 特殊逻辑：如果未开启分组(n=0)且为单源，直接返回原始数据
   // 若为多源，即使n=0也强制执行精确时间点去重，以消除源之间的重复数据
   if (n === 0 && !isMultiSource) {
@@ -26,83 +29,70 @@ export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
 
   // 按 n 分钟分组
   const groupedByTime = filteredDanmus.reduce((acc, danmu) => {
-    // 获取时间：优先使用 t 字段，如果没有则使用 p 的第一个值
     const time = danmu.t !== undefined ? danmu.t : parseFloat(danmu.p.split(',')[0]);
-    
-    // 确定分组键：n=0时使用精确时间(保留2位小数)，否则使用分钟索引
     const groupKey = n === 0 ? time.toFixed(2) : Math.floor(time / (n * 60));
 
-    // 初始化分组
     if (!acc[groupKey]) {
       acc[groupKey] = [];
     }
 
-    // 添加到对应分组
     acc[groupKey].push({ ...danmu, t: time });
     return acc;
   }, {});
 
-  // 处理每组的弹幕
   const result = Object.keys(groupedByTime).map(key => {
     const danmus = groupedByTime[key];
 
-    // 按消息内容分组
     const groupedByMessage = danmus.reduce((acc, danmu) => {
-      const message = danmu.m.split(' X')[0].trim(); // 提取原始消息（去除 Xn 后缀）
+      const message = danmu.m.split(' X')[0].trim();
       if (!acc[message]) {
         acc[message] = {
           count: 0,
           earliestT: danmu.t,
           cid: danmu.cid,
           p: danmu.p,
-          like: 0,  // 初始化like字段
-          sources: new Set() // 收集当前具体弹幕内容的真实独立来源
+          like: 0,
+          sources: new Set()
         };
       }
       acc[message].count += 1;
-      // 更新最早时间
       acc[message].earliestT = Math.min(acc[message].earliestT, danmu.t);
-      // 合并like字段，如果是undefined则视为0
       acc[message].like += (danmu.like !== undefined ? danmu.like : 0);
-      
-      // 提取当前弹幕的来源并加入集合中，建立弹幕内容与平台的精确映射
+
       if (danmu.p) {
         const match = danmu.p.match(/\[([^\]]*)\]$/);
         if (match && match[1]) {
-            match[1].split(/[&＆]/).forEach(s => {
-                if (s.trim()) acc[message].sources.add(s.trim());
-            });
+          match[1].split(/[&＆]/).forEach(source => {
+            if (source.trim()) acc[message].sources.add(source.trim());
+          });
         }
       }
       return acc;
     }, {});
 
-    // 转换为结果格式
     return Object.keys(groupedByMessage).map(message => {
       const data = groupedByMessage[message];
-      
-      // 以当前这句弹幕实际跨越的独立平台数作为除数，进行局部精准降噪，保留单平台内真实的重复计数
-      let localSourceCount = Math.max(1, data.sources.size);
-      let displayCount = Math.round(data.count / localSourceCount);
-      
+      const localSourceCount = isMultiSource ? Math.max(1, data.sources.size) : 1;
+      let displayCount = isMultiSource ? Math.round(data.count / localSourceCount) : data.count;
       if (displayCount < 1) displayCount = 1;
 
-      // 将收集到的所有真实独立来源重新拼装回 p 属性标签中
-      const combinedSources = Array.from(data.sources).join('＆');
-      const newP = data.p.replace(/\[([^\]]*)\]$/, `[${combinedSources}]`);
+      const combinedSources = isMultiSource && data.sources.size > 0
+        ? Array.from(data.sources).join('＆')
+        : null;
+      const newP = combinedSources
+        ? data.p.replace(/\[([^\]]*)\]$/, `[${combinedSources}]`)
+        : data.p;
 
       return {
         cid: data.cid,
         p: newP,
-        // 仅当计算后的逻辑计数大于1时才显示 "x N"
         m: displayCount > 1 ? `${message}\u200Ax\u200A${displayCount}` : message,
         t: data.earliestT,
-        like: data.like // 包含合并后的like字段
+        like: data.like
       };
     });
   });
 
-  // 展平结果并按时间排序
   return result.flat().sort((a, b) => a.t - b.t);
 }
 
@@ -111,49 +101,130 @@ export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
  * @param {Array} groupedDanmus 弹幕列表
  * @returns {Array} 处理后的弹幕列表
  */
+const DANMU_LIKE_PRESETS = ['default', 'pink_under_1k', 'outline_under_1k', 'pink_only', 'outline_only', 'off'];
+const DEFAULT_RANDOM_COLOR_POOL = [
+  16777215, 16777215, 16777215, 16777215,
+  16777215, 16777215, 16777215, 16777215,
+  16744319, 16752762, 16774799, 9498256,
+  8388564, 8900346, 14204888, 16758465
+];
+const LOW_THRESHOLD_DANMU_SOURCES = Object.freeze([
+  '[hanjutv]',
+  '[韩小圈]',
+  '[极速版]',
+  '[韩小圈＆极速版]',
+  '[sohu]',
+  '[bilibili1]',
+  '[migu]',
+]);
+
+function normalizeDanmuLikePreset(rawPreset) {
+  const preset = String(rawPreset || 'default').trim().toLowerCase();
+  return DANMU_LIKE_PRESETS.includes(preset) ? preset : 'default';
+}
+
+function isLowThresholdDanmuSource(item) {
+  const sourceText = String(item?.p || '');
+  return LOW_THRESHOLD_DANMU_SOURCES.some(source => sourceText.includes(source));
+}
+
+function resolveDanmuLikeIcon(item, preset, { lowThreshold = false } = {}) {
+  const like = Number(item?.like) || 0;
+  const fireThreshold = lowThreshold ? 100 : 1000;
+
+  // 第二档：1000 以下用 💗，1000 以上用 🔥
+  if (preset === 'pink_under_1k') {
+    return like >= fireThreshold ? '🔥' : '💗';
+  }
+
+  // 第三档：1000 以下用 ♡，1000 以上用 🔥
+  if (preset === 'outline_under_1k') {
+    return like >= fireThreshold ? '🔥' : '♡';
+  }
+
+  // 第四档：统一 💗
+  if (preset === 'pink_only') {
+    return '💗';
+  }
+
+  // 第五档：统一 ♡
+  if (preset === 'outline_only') {
+    return '♡';
+  }
+
+  // 第一档（默认）：<100 用 ♡，100~999 用 💗，>=1000 用 🔥
+  if (like >= fireThreshold) return '🔥';
+  if (like >= 100) return '💗';
+  return '♡';
+}
+
+function parseColorPool(rawPool) {
+  return String(rawPool || '')
+    .split(',')
+    .map(item => Number.parseInt(item.trim(), 10))
+    .filter(color => Number.isInteger(color) && color >= 0 && color <= 16777215);
+}
+
+function resolveConvertColorConfig(rawConvertColor, rawColorPool = '') {
+  const value = String(rawConvertColor || '').trim();
+
+  if (!value || value === 'default') {
+    return null;
+  }
+
+  if (value === 'white') {
+    return { mode: 'white', pool: [16777215] };
+  }
+
+  if (value === 'color') {
+    const customPool = parseColorPool(rawColorPool);
+    return { mode: 'random', pool: customPool.length > 0 ? customPool : DEFAULT_RANDOM_COLOR_POOL };
+  }
+
+  const pool = parseColorPool(value);
+
+  if (pool.length === 0) {
+    return null;
+  }
+
+  return { mode: 'random', pool };
+}
+
 export function handleDanmusLike(groupedDanmus) {
+  const likePreset = normalizeDanmuLikePreset(globals.danmuLikePreset);
+
   if (!globals.likeSwitch) {
     return groupedDanmus;
   }
-  const lowThresholdSources = new Set([
-    '[hanjutv]',
-    '[sohu]',
-    '[bilibili1]',
-    '[migu]',
-  ]);
+
+  if (likePreset === 'off') {
+    return groupedDanmus.map(item => {
+      const { like, ...rest } = item;
+      return rest;
+    });
+  }
+
   return groupedDanmus.map(item => {
-    // 如果item没有like字段或者like值小于5，则不处理
     if (!item.like || item.like < 5) {
       return item;
     }
 
-    // 韩剧TV 双链路标签可能继续扩展，按来源标签内容判断更稳。
-    const sourceTag = item.p.match(/,(\[[^\]]+\])$/)?.[1] || '';
-    const isHanjutvVariantTag = sourceTag.includes('韩小圈') || sourceTag.includes('极速版');
-    const isLowThresholdSource = isHanjutvVariantTag || lowThresholdSources.has(sourceTag);
+    const icon = resolveDanmuLikeIcon(item, likePreset, {
+      lowThreshold: isLowThresholdDanmuSource(item),
+    });
 
-    // 确定阈值：特定源中>=100用🔥，其他>=1000用🔥
-    const threshold = isLowThresholdSource ? 100 : 1000;
-    const icon = item.like >= threshold ? '🔥' : '️♡';
-
-    // 格式化点赞数，缩写显示
     let formattedLike;
     if (item.like >= 10000) {
-      // 万级别，如 1.2w
       formattedLike = (item.like / 10000).toFixed(1) + 'w';
     } else if (item.like >= 1000) {
-      // 千级别，如 1.2k
       formattedLike = (item.like / 1000).toFixed(1) + 'k';
     } else {
-      // 百级别及以下，直接显示数字
       formattedLike = item.like.toString();
     }
 
-    // 在弹幕内容m字段后面添加点赞信息
     const likeText = `\u200A${icon}${formattedLike}`;
     const newM = item.m + likeText;
 
-    // 创建新对象，复制原属性，更新m字段，并删除like字段
     const { like, ...rest } = item;
     return {
       ...rest,
@@ -191,10 +262,11 @@ export function limitDanmusByCount(filteredDanmus, danmuLimit) {
   return result;
 }
 
-export function convertToDanmakuJson(contents, platform) {
+export function convertToDanmakuJson(contents, platform, offsetSeconds = 0) {
   let danmus = [];
   let cidCounter = 1;
-  let isMultiSource = false; // 用于记录当前弹幕集合是否为多源组合
+  let isMultiSource = false;
+  const timeOffset = Number(offsetSeconds) || 0;
 
   // 统一处理输入为数组
   let items = [];
@@ -225,20 +297,25 @@ export function convertToDanmakuJson(contents, platform) {
     return [];
   }
 
+  if (!isMultiSource && /[&＆]/.test(String(platform || ''))) {
+    isMultiSource = true;
+  }
+
   for (const item of items) {
     let attributes, m;
     let time, mode, color;
+    let timeNum;
 
     // 新增：处理新格式的弹幕数据
     if ("progress" in item && "mode" in item && "content" in item) {
       // 处理新格式的弹幕对象
-      time = (item.progress / 1000).toFixed(2);
+      timeNum = item.progress / 1000;
       mode = item.mode || 1;
       color = item.color || 16777215;
       m = item.content;
     } else if ("timepoint" in item) {
       // 处理对象数组输入
-      time = parseFloat(item.timepoint).toFixed(2);
+      timeNum = parseFloat(item.timepoint);
       mode = item.ct || 0;
       color = item.color || 16777215;
       m = item.content;
@@ -248,7 +325,7 @@ export function convertToDanmakuJson(contents, platform) {
       }
       // 处理 XML 解析后的格式
       const pValues = item.p.split(",");
-      time = parseFloat(pValues[0]).toFixed(2);
+      timeNum = parseFloat(pValues[0]);
       mode = pValues[1] || 0;
 
       // 支持多种格式的 p 属性
@@ -268,17 +345,26 @@ export function convertToDanmakuJson(contents, platform) {
       m = item.m;
     }
 
-    // 优先使用弹幕自带的 _sourceLabel（应对合并工具），其次是外部传入的宏观 platform
-    let currentPlatform = item._sourceLabel || platform;
-    
-    // 如果存在实时拉取的副源标签，安全追加
-    if (item.realTimeSource && !currentPlatform.includes(item.realTimeSource)) {
-        currentPlatform = `${currentPlatform}＆${item.realTimeSource}`;
+    if (!Number.isFinite(timeNum)) {
+      continue;
     }
 
-    // 在组装字符串时，顺带通过符号检测判定当前是否为多源组合数据
+    if (timeOffset !== 0) {
+      timeNum = Math.max(0, timeNum + timeOffset);
+    }
+
+    time = timeNum.toFixed(2);
+
+    // 优先使用弹幕自带的 _sourceLabel（应对合并工具），其次是外部传入的宏观 platform
+    let currentPlatform = item._sourceLabel || platform;
+
+    // 如果存在实时拉取的副源标签，安全追加
+    if (item.realTimeSource && !currentPlatform.includes(item.realTimeSource)) {
+      currentPlatform = `${currentPlatform}＆${item.realTimeSource}`;
+    }
+
     if (!isMultiSource && /[&＆]/.test(currentPlatform)) {
-        isMultiSource = true;
+      isMultiSource = true;
     }
 
     attributes = [
@@ -325,7 +411,8 @@ export function convertToDanmakuJson(contents, platform) {
 
   // 应用弹幕转换规则（在去重和限制弹幕数之后）
   let convertedDanmus = limitDanmusByCount(likeDanmus, globals.danmuLimit);
-  if (globals.convertTopBottomToScroll || globals.convertColor === 'white' || globals.convertColor === 'color') {
+  const convertColorConfig = resolveConvertColorConfig(globals.convertColor, globals.colorPool);
+  if (globals.convertTopBottomToScroll || convertColorConfig) {
     let topBottomCount = 0;
     let colorCount = 0;
 
@@ -346,18 +433,19 @@ export function convertToDanmakuJson(contents, platform) {
 
       // 2. 弹幕转换颜色
       // 2.1 将彩色弹幕转换为白色
-      if (globals.convertColor === 'white' && color !== 16777215) {
+      if (convertColorConfig?.mode === 'white' && color !== 16777215) {
         colorCount++;
         color = 16777215;
         modified = true;
       }
-      // 2.2 将白色弹幕转换为随机颜色，白、红、橙、黄、绿、青、蓝、紫、粉（模拟真实情况，增加白色出现概率）
-      let colors = globals.colorPool.split(',').map(c => parseInt(c.trim(), 10)).filter(c => !isNaN(c) && c >= 0 && c <= 16777215);
-      let randomColor = colors[Math.floor(Math.random() * colors.length)];
-      if (globals.convertColor === 'color' && color === 16777215 && color !== randomColor) {
-        colorCount++;
-        color = randomColor;
-        modified = true;
+      // 2.2 将白色弹幕按颜色池随机转换，支持默认池和自定义 CSV 颜色池
+      if (convertColorConfig?.mode === 'random' && color === 16777215) {
+        const randomColor = convertColorConfig.pool[Math.floor(Math.random() * convertColorConfig.pool.length)];
+        if (color !== randomColor) {
+          colorCount++;
+          color = randomColor;
+          modified = true;
+        }
       }
 
       if (modified) {

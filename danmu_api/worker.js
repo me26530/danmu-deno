@@ -1,25 +1,107 @@
 import { Globals } from './configs/globals.js';
 import { jsonResponse } from './utils/http-util.js';
 import { log, formatLogMessage } from './utils/log-util.js'
-import { getRedisCaches, judgeRedisValid } from "./utils/redis-util.js";
-import { cleanupExpiredIPs, findUrlById, getCommentCache, getLocalCaches, judgeLocalCacheValid } from "./utils/cache-util.js";
+import { getRedisCaches, judgeRedisValid, updateRedisCaches } from "./utils/redis-util.js";
+import { cleanupExpiredIPs, findUrlById, getCommentCache, getLocalCaches, judgeLocalCacheValid, migrateLegacyRuntimeCaches, updateLocalCaches } from "./utils/cache-util.js";
 import { formatDanmuResponse } from "./utils/danmu-util.js";
+import { parseBoolean } from "./utils/common-util.js";
 import AIClient from './utils/ai-util.js';
 import { initBangumiData } from "./utils/bangumi-data-util.js";
-import { getBangumi, getComment, getCommentByUrl, getSegmentComment, matchAnime, searchAnime, searchEpisodes } from "./apis/dandan-api.js";
-import { getFongmiDanmaku } from "./apis/clients/fongmi-api.js";
-import { handleConfig, handleUI, handleLogs, handleClearLogs, handleDeploy, handleClearCache, handleReqRecords } from "./apis/system-api.js";
+import { getBangumi, getComment, getCommentByUrl, getCommentDuration, getSegmentComment, matchAnime, searchAnime, searchEpisodes } from "./apis/dandan-api.js";
+import { handleFongmiDanmaku } from "./apis/fongmi-api.js";
+import { handleConfig, handleUI, handleLogs, handleClearLogs, handleDeploy, handleClearCache, handleReqRecords, handleRuntimeInfo, handleRuntimeCheckUpdate, handleRuntimeUpdate, handleCacheAnimes } from "./apis/system-api.js";
 import { handleSetEnv, handleAddEnv, handleDelEnv, handleAiVerify } from "./apis/env-api.js";
-import { Segment } from "./models/dandan-model.js"
+import { Segment } from "./models/dandan-model.js";
 import {
     handleCookieStatus,
-    handleCookieVerify,
     handleQRGenerate,
     handleQRCheck,
-    handleCookieSave
+    handleCookieSave,
+    handleCookieClear,
+    handleCookieRefresh,
+    handleCookieVerify,
+    handleCookieRefreshToken
 } from "./utils/cookie-util.js";
-
 let globals;
+const ADMIN_MUTATION_ROUTES = new Set([
+  'POST /api/logs/clear',
+  'POST /api/env/set',
+  'POST /api/env/add',
+  'POST /api/env/del',
+  'POST /api/deploy',
+  'POST /api/cache/clear',
+  'POST /api/runtime/update',
+  'POST /api/cookie/qr/generate',
+  'POST /api/cookie/qr/check',
+  'POST /api/cookie/verify',
+  'POST /api/cookie/save',
+  'POST /api/cookie/clear',
+  'POST /api/cookie/refresh',
+  'POST /api/cookie/refresh-token',
+  'POST /api/ai/verify',
+]);
+const AI_VERIFY_COOLDOWN_MS = 5 * 60 * 1000;
+let pendingAiVerify = null;
+let lastAiVerifyAttemptAt = 0;
+
+function isPublicRuntimeReadRoute(path, method) {
+  return (path === "/api/runtime/info" && method === "GET")
+    || (path === "/api/runtime/check-update" && method === "POST");
+}
+
+function buildAuthContext(currentToken) {
+  const adminToken = globals?.adminToken || '';
+  return {
+    currentToken,
+    isAdmin: Boolean(adminToken) && currentToken === adminToken,
+  };
+}
+
+function buildFongmiAuthContext(authContext) {
+  // FongMi 播放入口优先按普通 TOKEN 处理。
+  // 当 TOKEN 与 ADMIN_TOKEN 设置为相同值时，请求首段无法区分两者；
+  // 播放器填写的是 /TOKEN/danmaku，应避免被误判为管理入口而返回空数组。
+  if (authContext?.currentToken && authContext.currentToken === globals?.token) {
+    return {
+      ...authContext,
+      isAdmin: false,
+    };
+  }
+
+  return authContext;
+}
+
+function getAdminGuardResponse(path, method, authContext) {
+  const routeKey = `${method} ${path}`;
+  if (!ADMIN_MUTATION_ROUTES.has(routeKey)) {
+    return null;
+  }
+
+  const adminToken = (globals?.adminToken || '').trim();
+  if (!adminToken) {
+    return jsonResponse(
+      {
+        errorCode: 403,
+        success: false,
+        errorMessage: "Admin token is not configured",
+      },
+      403
+    );
+  }
+
+  if (!authContext?.isAdmin) {
+    return jsonResponse(
+      {
+        errorCode: 403,
+        success: false,
+        errorMessage: "Admin token required",
+      },
+      403
+    );
+  }
+
+  return null;
+}
 
 async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
   // 加载全局变量和环境变量配置
@@ -28,9 +110,11 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
   const url = new URL(req.url);
   let path = url.pathname;
   const method = req.method;
+  const initialParts = path.split("/").filter(Boolean);
+  const isPossibleFongmiShortEntry = method === "POST" && initialParts.length === 1 && initialParts[0] === globals.token;
 
   //  Bangumi Data 辅助函数，用于判断数据更新
-  const isDataDependentRequest = path.includes('/search') || path.includes('/match') || path.includes('/danmaku');
+  const isDataDependentRequest = path.includes('/search') || path.includes('/match') || path.includes('/fongmi') || path.includes('/danmaku') || isPossibleFongmiShortEntry;
 
   if (globals.useBangumiData) {
       await initBangumiData(deployPlatform, isDataDependentRequest, ctx);
@@ -43,17 +127,29 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     await judgeLocalRedisValid(path);
   }
   await judgeRedisValid(path);
-  if (!globals.aiValid && globals.aiBaseUrl && globals.aiModel && globals.aiApiKey && path !== "/favicon.ico" && path !== "/robots.txt") {
-    const ai = new AIClient({
-      baseURL: globals.aiBaseUrl,
-      model: globals.aiModel,
-      apiKey: globals.aiApiKey,
-      systemPrompt: '回答尽量简洁',
-    })
-
-    const status = await ai.verify()
-    if (status.ok) {
-      globals.aiValid = true;
+  const shouldTryAiVerify = !globals.aiValid && globals.aiBaseUrl && globals.aiModel && globals.aiApiKey && path !== "/favicon.ico" && path !== "/robots.txt";
+  if (shouldTryAiVerify) {
+    const now = Date.now();
+    if (!pendingAiVerify && (now - lastAiVerifyAttemptAt >= AI_VERIFY_COOLDOWN_MS)) {
+      lastAiVerifyAttemptAt = now;
+      pendingAiVerify = (async () => {
+        try {
+          const ai = new AIClient({
+            baseURL: globals.aiBaseUrl,
+            model: globals.aiModel,
+            apiKey: globals.aiApiKey,
+            systemPrompt: '回答尽量简洁',
+          });
+          const status = await ai.verify();
+          if (status.ok) {
+            globals.aiValid = true;
+          }
+        } catch (error) {
+          log("warn", `[AI Verify] verification failed: ${error.message}`);
+        } finally {
+          pendingAiVerify = null;
+        }
+      })();
     }
   }
 
@@ -76,17 +172,19 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
   // --- 校验 token ---
   const parts = path.split("/").filter(Boolean); // 去掉空段
 
-  const knownApiPaths = ["api", "v1", "v2", "search", "match", "bangumi", "comment", "danmaku"];
+  const knownApiPaths = ["api", "v1", "v2", "search", "match", "bangumi", "comment", "fongmi", "danmaku"];
 
   const firstPart = parts[0] || "";
   const isDefaultToken = globals.token === "87654321";
   const isValidToken = firstPart === globals.token || firstPart === globals.adminToken;
+  const isFongmiShortEntry = parts.length === 1 && firstPart === globals.token;
 
-  globals.currentToken = 
+  const currentToken =
     isValidToken ? firstPart :
-    isDefaultToken && (firstPart === "87654321" || knownApiPaths.includes(firstPart)) ? 
+    isDefaultToken && (firstPart === "87654321" || knownApiPaths.includes(firstPart)) ?
       (firstPart === "87654321" ? firstPart : "87654321") :
     "";
+  const authContext = buildAuthContext(currentToken);
 
   if (deployPlatform === "node" && globals.localCacheValid && path !== "/favicon.ico" && path !== "/robots.txt") {
     await getLocalCaches();
@@ -99,20 +197,38 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     await getLocalRedisCaches();
   }
 
+  const migratedLegacyCache = migrateLegacyRuntimeCaches();
+  if (migratedLegacyCache) {
+    globals.lastHashes.animes = null;
+    globals.lastHashes.episodeIds = null;
+  }
+
+  if (migratedLegacyCache && path !== "/favicon.ico" && path !== "/robots.txt") {
+    if (deployPlatform === "node" && globals.localCacheValid) {
+      await updateLocalCaches();
+    }
+    if (globals.redisValid) {
+      await updateRedisCaches();
+    }
+    if (deployPlatform === "node" && globals.localRedisValid) {
+      const { updateLocalRedisCaches } = await import("./utils/local-redis-util.js");
+      await updateLocalRedisCaches();
+    }
+  }
+
   // 检查路径是否包含指定的接口关键字
   const targetPaths = [
     '/api/v2/search/anime',
     '/api/v2/match',
     '/api/v2/search/episodes',
     '/api/v2/fongmi/danmaku',
-    '/danmaku',
     '/api/v2/bangumi',
     '/api/v2/comment',
     '/api/v2/segmentcomment'
   ];
 
   // 只有当path包含指定接口关键字时才添加到请求记录数组
-  if (targetPaths.some(targetPath => path.includes(targetPath))) {
+  if (currentToken && targetPaths.some(targetPath => path.includes(targetPath))) {
     // 更新今日请求计数
     // 从 reqRecords 最后一个元素获取上一个请求的时间
     const lastRecord = globals.reqRecords.length > 0 ? globals.reqRecords[globals.reqRecords.length - 1] : null;
@@ -120,8 +236,7 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
     if (lastRecord) {
       const lastDate = new Date(lastRecord.timestamp).toDateString();
-      console.log("currentDate: ", currentDate);
-      console.log("lastDate: ", lastDate);
+      log("debug", `[ReqRecords] currentDate=${currentDate}, lastDate=${lastDate}`);
       if (lastDate !== currentDate) {
         // 新的一天，重置计数
         globals.todayReqNum = 1;
@@ -181,7 +296,7 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
   // GET /
   if (path === "/" && method === "GET") {
-    return handleUI();
+    return handleUI(currentToken);
   }
 
   if (path === "/favicon.ico" || path === "/robots.txt" || method === "OPTIONS") {
@@ -205,7 +320,13 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
       } else if (!knownApiPaths.includes(parts[0])) {
         // 对于 /api/config 路径，我们允许无 token 访问，但返回有限信息
         if (path === "/api/config" && method === "GET") {
-          return handleConfig(false); // 无权限
+          return handleConfig(false, authContext); // 无权限
+        }
+        if (isPublicRuntimeReadRoute(path, method)) {
+          if (path === "/api/runtime/info") {
+            return handleRuntimeInfo(authContext);
+          }
+          return handleRuntimeCheckUpdate(authContext);
         }
         // 第一段不是已知的 API 路径，可能是错误的 token
         // 返回 401
@@ -222,7 +343,13 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     if (parts.length < 1 || (parts[0] !== globals.token && parts[0] !== globals.adminToken)) {
       // 对于 /api/config 路径，如果使用默认 token，我们允许无 token 访问，但返回有限信息
       if (path === "/api/config" && method === "GET") {
-        return handleConfig(false); // 无权限
+        return handleConfig(false, authContext); // 无权限
+      }
+      if (isPublicRuntimeReadRoute(path, method)) {
+        if (path === "/api/runtime/info") {
+          return handleRuntimeInfo(authContext);
+        }
+        return handleRuntimeCheckUpdate(authContext);
       }
       log("error", `Invalid or missing token in path: ${path}`);
       return jsonResponse(
@@ -234,29 +361,55 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     path = "/" + parts.slice(1).join("/");
   }
 
-  // 兼容部分客户端将自定义弹幕短地址再次拼接官方完整路径的情况
-  // 例如: /danmaku/api/v2/fongmi/danmaku?name=...&episode=...
-  if (path.endsWith("/danmaku/api/v2/fongmi/danmaku")) {
+  // 兼容部分 Fongmi/壳客户端把短入口再次拼上完整接口路径：
+  // /TOKEN/danmaku/api/v2/fongmi/danmaku -> /danmaku
+  if (path === "/danmaku/api/v2/fongmi/danmaku") {
     log("info", `[Path Fix] Collapsed nested danmaku path: "${path}" -> "/danmaku"`);
     path = "/danmaku";
   }
 
   // GET /api/config - 获取配置信息 (需要 token)
   if (path === "/api/config" && method === "GET") {
-    return handleConfig(true); // 有权限
+    return handleConfig(true, authContext); // 有权限
+  }
+
+  // POST /TOKEN - Fongmi 短入口；GET /TOKEN 继续走 UI，不与管理页面冲突
+  if (path === "/" && method === "POST" && isFongmiShortEntry) {
+    return handleFongmiDanmaku(url, req, clientIp, buildFongmiAuthContext(authContext));
+  }
+
+  // GET|POST /TOKEN/danmaku - 兼容 PR #296 和部分客户端推荐的短别名入口
+  if (path === "/danmaku" && (method === "GET" || method === "POST")) {
+    return handleFongmiDanmaku(url, req, clientIp, buildFongmiAuthContext(authContext));
   }
 
   // GET /api/reqrecords - 获取请求记录 (需要 token)
   if (path === "/api/reqrecords" && method === "GET") {
-    return handleReqRecords();
+    return handleReqRecords(authContext);
+  }
+
+  // GET /api/cache/animes - 获取最近 animes 缓存，供合并/偏移配置面板辅助填写
+  if (path === "/api/cache/animes" && method === "GET") {
+    return handleCacheAnimes();
+  }
+
+  // GET /api/runtime/info - 获取运行时信息 (需要 token)
+  if (path === "/api/runtime/info" && method === "GET") {
+    return handleRuntimeInfo(authContext);
+  }
+
+  // POST /api/runtime/check-update - 强制检查最新版本 (需要 token)
+  if (path === "/api/runtime/check-update" && method === "POST") {
+    return handleRuntimeCheckUpdate(authContext);
   }
 
   log("info", path);
 
   // 智能处理API路径前缀，确保最终有一个正确的 /api/v2
-  if (path !== "/" && path !== "/danmaku" && path !== "/api/logs" && !path.startsWith('/api/env') 
+  if (path !== "/" && path !== "/danmaku" && path !== "/api/logs" && !path.startsWith('/api/env')
     && !path.startsWith('/api/deploy') && !path.startsWith('/api/cache')
     && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')
+    && !path.startsWith('/api/runtime')
     && !path.startsWith('/api/ai')) {
       log("info", `[Path Check] Starting path normalization for: "${path}"`);
       const pathBeforeCleanup = path; // 保存清理前的路径检查是否修改
@@ -269,6 +422,13 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
           path = path.substring('/api/v2'.length);
       }
 
+      // 1.5 兼容：部分客户端会把前缀写成 /v2/...（省略 /api）。
+      // 如果直接拼接会得到 /api/v2/v2/...，这里先把 /v2 规范化成 /api/v2。
+      if (path === '/v2' || path.startsWith('/v2/')) {
+          log("debug", `[Path Check] Found /v2 shorthand prefix. Converting to /api/v2...`);
+          path = '/api' + path; // '/api' + '/v2/xxx' => '/api/v2/xxx'
+      }
+
       // 打印日志：只有在发生清理时才显示清理后的路径，否则显示"无需清理"
       if (path !== pathBeforeCleanup) {
           log("info", `[Path Check] Path after cleanup: "${path}"`);
@@ -278,9 +438,10 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
       // 补全：如果路径缺少前缀（例如请求原始路径为 /search/anime 或 /v2/search/anime），则智能补全
       const pathBeforePrefixCheck = path;
-      if (!path.startsWith('/api/v2') && path !== '/' && !path.startsWith('/api/logs') 
+      if (!path.startsWith('/api/v2') && path !== '/' && !path.startsWith('/api/logs')
         && !path.startsWith('/api/env') && !path.startsWith('/api/cache')
         && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')
+        && !path.startsWith('/api/runtime')
         && !path.startsWith('/api/ai')) {
           if (path.startsWith('/v2/') || path === '/v2') {
               log("info", `[Path Check] Path is missing /api prefix. Adding /api...`);
@@ -304,12 +465,19 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
   // GET /
   if (path === "/" && method === "GET") {
-    return handleUI();
+    return handleUI(currentToken);
+  }
+
+  // 关键写操作统一要求 ADMIN_TOKEN
+  const adminGuardResponse = getAdminGuardResponse(path, method, authContext);
+  if (adminGuardResponse) {
+    return adminGuardResponse;
   }
 
   // GET /api/v2/search/anime
   if (path === "/api/v2/search/anime" && method === "GET") {
-    return searchAnime(url);
+    // 公共搜索接口保持原 URL/参数不变，但默认走轻量摘要模式，避免大结果集提前展开并写入全部剧集。
+    return searchAnime(url, null, null, null, { lazySearch: true });
   }
 
   // GET /api/v2/search/episodes
@@ -317,14 +485,9 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     return searchEpisodes(url);
   }
 
-  // GET|POST /api/v2/fongmi/danmaku
+  // GET/POST /api/v2/fongmi/danmaku - Fongmi 弹幕搜索适配入口
   if (path === "/api/v2/fongmi/danmaku" && (method === "GET" || method === "POST")) {
-    return getFongmiDanmaku(url, req);
-  }
-
-  // GET|POST /danmaku
-  if (path === "/danmaku" && (method === "GET" || method === "POST")) {
-    return getFongmiDanmaku(url, req);
+    return handleFongmiDanmaku(url, req, clientIp, buildFongmiAuthContext(authContext));
   }
 
   // GET /api/v2/match
@@ -334,17 +497,20 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
   // GET /api/v2/bangumi/:animeId
   if (path.startsWith("/api/v2/bangumi/") && method === "GET") {
-    return getBangumi(path);
+    return getBangumi(path, null, url.searchParams.get('source'));
+  }
+
+  // GET /api/v2/comment/:commentId/duration
+  if (path.startsWith("/api/v2/comment/") && path.endsWith("/duration") && method === "GET") {
+    return getCommentDuration(path);
   }
 
   // GET /api/v2/comment/:commentId or /api/v2/comment?url=xxx or /api/v2/extcomment?url=xxx
   if ((path.startsWith("/api/v2/comment") || path.startsWith("/api/v2/extcomment")) && method === "GET") {
-    const queryFormat = url.searchParams.get('format');
+    const queryFormat = resolveDanmuOutputFormat(path, url.searchParams.get('format'));
     const videoUrl = url.searchParams.get('url');
-    const segmentFlagParam = url.searchParams.get('segmentflag');
-    const durationParam = url.searchParams.get('duration');
-    const segmentFlag = segmentFlagParam === 'true' || segmentFlagParam === '1';
-    const includeDuration = durationParam === 'true' || durationParam === '1';
+    const segmentFlag = parseBoolean(url.searchParams.get('segmentflag'), false);
+    const includeDuration = parseBoolean(url.searchParams.get('duration'), false);
 
     // ⚠️ 限流设计说明：
     // 1. 先检查缓存，缓存命中时直接返回，不计入限流次数
@@ -353,11 +519,14 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
     // 如果有url参数，则通过URL获取弹幕
     if (videoUrl) {
-      // 先检查缓存
-      const cachedComments = getCommentCache(videoUrl);
+      // 先检查缓存（分片列表请求不走弹幕缓存）
+      const cachedComments = !segmentFlag ? getCommentCache(videoUrl) : null;
       if (cachedComments !== null) {
         log("info", `[Rate Limit] Cache hit for URL: ${videoUrl}, skipping rate limit check`);
-        return getCommentByUrl(videoUrl, queryFormat, segmentFlag, includeDuration);
+        const responseData = { count: cachedComments.length, comments: cachedComments };
+        if (!includeDuration) {
+          return formatDanmuResponse(responseData, queryFormat);
+        }
       }
 
       // 缓存未命中，执行限流检查（如果 rateLimitMaxRequests > 0 则启用限流）
@@ -408,11 +577,14 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     let urlForComment = findUrlById(commentId);
 
     if (urlForComment) {
-      // 检查弹幕缓存 - 缓存命中时直接返回，不计入限流
-      const cachedComments = getCommentCache(urlForComment);
+      // 检查弹幕缓存（分片列表请求不走弹幕缓存）- 缓存命中时直接返回，不计入限流
+      const cachedComments = !segmentFlag ? getCommentCache(urlForComment) : null;
       if (cachedComments !== null) {
         log("info", `[Rate Limit] Cache hit for URL: ${urlForComment}, skipping rate limit check`);
-        return getComment(path, queryFormat, segmentFlag, clientIp, includeDuration);
+        const responseData = { count: cachedComments.length, comments: cachedComments };
+        if (!includeDuration) {
+          return formatDanmuResponse(responseData, queryFormat);
+        }
       }
     }
 
@@ -455,9 +627,9 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
   }
 
   // POST /api/v2/segmentcomment - 接收segment类的JSON请求体
- if (path.startsWith("/api/v2/segmentcomment") && method === "POST") {
+  if (path.startsWith("/api/v2/segmentcomment") && method === "POST") {
     try {
-      const queryFormat = url.searchParams.get('format');
+      const queryFormat = resolveDanmuOutputFormat(path, url.searchParams.get('format'));
       // 从请求体获取segment数据
       const requestBody = await req.json();
       let segment;
@@ -486,37 +658,42 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
 
   // GET /api/logs
   if (path === "/api/logs" && method === "GET") {
-    return handleLogs();
+    return handleLogs(authContext);
   }
 
   // POST /api/logs/clear
   if (path === "/api/logs/clear" && method === "POST") {
-    return handleClearLogs();
+    return handleClearLogs(authContext);
   }
 
   // POST /api/env/set - 设置环境变量
   if (path === "/api/env/set" && method === "POST") {
-    return handleSetEnv(req);
+    return handleSetEnv(req, authContext);
   }
 
   // POST /api/env/add - 添加环境变量
   if (path === "/api/env/add" && method === "POST") {
-    return handleAddEnv(req);
+    return handleAddEnv(req, authContext);
   }
 
   // POST /api/env/del - 删除环境变量
   if (path === "/api/env/del" && method === "POST") {
-    return handleDelEnv(req);
+    return handleDelEnv(req, authContext);
   }
 
   // POST /api/deploy - 重新部署
   if (path === "/api/deploy" && method === "POST") {
-    return handleDeploy();
+    return handleDeploy(authContext);
+  }
+
+  // POST /api/runtime/update - 在线更新/重建
+  if (path === "/api/runtime/update" && method === "POST") {
+    return handleRuntimeUpdate(authContext);
   }
 
   // POST /api/cache/clear - 清理缓存
   if (path === "/api/cache/clear" && method === "POST") {
-    return handleClearCache();
+    return handleClearCache(authContext);
   }
 
   // ========== Cookie 管理 API ==========
@@ -536,7 +713,7 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     return handleQRCheck(req);
   }
 
-  // POST /api/cookie/verify - 校验指定Cookie（用于前端实时检测）
+  // POST /api/cookie/verify - 验证Cookie有效性（新增）
   if (path === "/api/cookie/verify" && method === "POST") {
     return handleCookieVerify(req);
   }
@@ -546,12 +723,42 @@ async function handleRequest(req, env, deployPlatform, clientIp, ctx) {
     return handleCookieSave(req);
   }
 
+  // POST /api/cookie/clear - 清除Cookie
+  if (path === "/api/cookie/clear" && method === "POST") {
+    return handleCookieClear();
+  }
+
+  // POST /api/cookie/refresh - 刷新Cookie
+  if (path === "/api/cookie/refresh" && method === "POST") {
+    return handleCookieRefresh();
+  }
+
+  // POST /api/cookie/refresh-token - 使用refresh_token刷新Cookie（新增）
+  if (path === "/api/cookie/refresh-token" && method === "POST") {
+    return handleCookieRefreshToken(req);
+  }
+
   // POST /api/ai/verify - 验证AI连通性
   if (path === "/api/ai/verify" && method === "POST") {
     return handleAiVerify(req);
   }
 
   return jsonResponse({ message: "Not found" }, 404);
+}
+
+function resolveDanmuOutputFormat(path, queryFormat) {
+  if (queryFormat) return queryFormat;
+  const normalizedPath = String(path || "").toLowerCase();
+
+  if (normalizedPath.endsWith(".xml")) {
+    return "xml";
+  }
+
+  if (normalizedPath.endsWith(".json")) {
+    return "json";
+  }
+
+  return queryFormat;
 }
 
 function matchIpBlacklistRule(rule, clientIp) {
@@ -653,7 +860,6 @@ function ipv6ToBytes(ip) {
 
   return bytes;
 }
-
 function isRunningOnVercel() {
   if (typeof process === 'undefined' || !process.env) {
     return false;
@@ -666,6 +872,18 @@ function isRunningOnVercel() {
 }
 
 function detectDeployPlatform(env) {
+  // Supabase Edge Functions / 普通 Deno 运行时适配。
+  // deno-worker.ts 会注入 DANMU_DEPLOY_PLATFORM=supabase；这里优先使用显式标记，
+  // 避免在 Deno 环境下被兜底误判为 cloudflare。
+  if (env?.DANMU_DEPLOY_PLATFORM) {
+    return env.DANMU_DEPLOY_PLATFORM;
+  }
+  if (env?.DENO_DEPLOYMENT_ID || env?.SB_REGION || env?.SUPABASE_URL) {
+    return "supabase";
+  }
+  if (typeof Deno !== 'undefined') {
+    return "deno";
+  }
   if (env?.SPACE_ID || (typeof process !== 'undefined' && process.env?.SPACE_ID)) {
     return "huggingface";
   }
@@ -738,4 +956,4 @@ export async function netlifyHandler(event, context) {
 }
 
 // 为了测试导出 handleRequest
-export { handleRequest};
+export { handleRequest };

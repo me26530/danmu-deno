@@ -3,9 +3,28 @@ import { jsonResponse } from "../utils/http-util.js";
 import { HTML_TEMPLATE } from "../ui/template.js";
 import { formatLogMessage, log } from "../utils/log-util.js";
 import { HandlerFactory } from "../configs/handlers/handler-factory.js";
+import { createRuntimeHandler } from "../runtime/runtime-handler-factory.js";
+import { clearBangumiDataCache, initBangumiData } from "../utils/bangumi-data-util.js";
 
-export function handleUI() {
-  return new Response(HTML_TEMPLATE.replace("globals.currentToken", globals.currentToken), {
+function escapeForSingleQuotedJsString(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/</g, "\\x3C")
+    .replace(/>/g, "\\x3E");
+}
+
+function normalizeAuth(auth = {}) {
+  const currentToken = typeof auth.currentToken === 'string' ? auth.currentToken : '';
+  const isAdmin = Boolean(auth.isAdmin);
+  return { currentToken, isAdmin };
+}
+
+export function handleUI(currentToken = "") {
+  const safeToken = escapeForSingleQuotedJsString(currentToken);
+  return new Response(HTML_TEMPLATE.replace("globals.currentToken", safeToken), {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Access-Control-Allow-Origin': '*'
@@ -13,7 +32,8 @@ export function handleUI() {
   });
 }
 
-export function handleConfig(hasPermission = false) {
+export function handleConfig(hasPermission = false, auth = {}) {
+  const { currentToken, isAdmin } = normalizeAuth(auth);
   // 获取环境变量配置
   const envVarConfig = globals.envVarConfig;
   
@@ -57,12 +77,12 @@ export function handleConfig(hasPermission = false) {
   
   // 准备原始环境变量，无权限时也需要脱敏
   let originalEnvVars = { ...globals.originalEnvVars };
-  if (!hasPermission || globals.currentToken !== globals.adminToken) {
+  if (!hasPermission || !isAdmin) {
     Object.keys(originalEnvVars).forEach(key => {
-      if (globals.currentToken !== globals.token || key !== "TOKEN") {
-        if (key in previewEnvVars && /^\*+$/.test(previewEnvVars[key])) {
-          originalEnvVars[key] = previewEnvVars[key];
-        }
+      const canShowRaw = hasPermission && (isAdmin || (currentToken === globals.token && key === "TOKEN"));
+      if (canShowRaw) return;
+      if (key in previewEnvVars && /^\*+$/.test(String(previewEnvVars[key]))) {
+        originalEnvVars[key] = previewEnvVars[key];
       }
     });
   }
@@ -76,7 +96,7 @@ export function handleConfig(hasPermission = false) {
     originalEnvVars: originalEnvVars, // 系统设置使用原始环境变量（已脱敏）
     hasAdminToken: hasAdminToken, // 添加admin token配置状态
     repository: "https://github.com/huangxd-/danmu_api.git",
-    description: "一个人人都能部署的基于 js 的弹幕 API 服务器，支持爱优腾芒哔咪人韩巴狐乐西埋帆弹幕直接获取，兼容弹弹play的搜索、详情查询和弹幕获取接口规范，并提供日志记录，支持vercel/netlify/edgeone/cloudflare/docker/hf等部署方式，不用提前下载弹幕，没有nas或小鸡也能一键部署。",
+    description: "一个人人都能部署的基于 js 的弹幕 API 服务器，支持爱优腾芒哔咪人韩巴狐乐西埋弹幕直接获取，兼容弹弹play的搜索、详情查询和弹幕获取接口规范，并提供日志记录，支持vercel/netlify/edgeone/cloudflare/docker等部署方式，不用提前下载弹幕，没有nas或小鸡也能一键部署。",
     notice: "本项目仅为个人学习爱好开发，代码开源。如有任何侵权行为，请联系本人删除。有问题提issue或私信机器人都ok，TG MSG ROBOT: [https://t.me/ddjdd_bot]; 推荐加互助群咨询，TG GROUP: [https://t.me/logvar_danmu_group]; 关注频道获取最新更新内容，TG CHANNEL: [https://t.me/logvar_danmu_channel]。"
   });
 }
@@ -118,24 +138,76 @@ export async function handleDeploy() {
   }
 }
 
+async function getRuntimeHandler() {
+  return createRuntimeHandler(globals);
+}
+
+export async function handleRuntimeInfo(auth = {}) {
+  try {
+    const handler = await getRuntimeHandler();
+    const info = await handler.getInfo();
+    return jsonResponse({
+      success: true,
+      ...info,
+      auth: {
+        isAdmin: Boolean(auth?.isAdmin)
+      }
+    }, 200);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown error');
+    log("error", `[server] Runtime info error: ${message}`);
+    return jsonResponse({ success: false, message: `Runtime info failed: ${message}` }, 500);
+  }
+}
+
+export async function handleRuntimeCheckUpdate(auth = {}) {
+  try {
+    const handler = await getRuntimeHandler();
+    const info = await handler.checkUpdate();
+    return jsonResponse({
+      success: true,
+      ...info,
+      auth: {
+        isAdmin: Boolean(auth?.isAdmin)
+      }
+    }, 200);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown error');
+    log("error", `[server] Runtime update check error: ${message}`);
+    return jsonResponse({ success: false, message: `Runtime check failed: ${message}` }, 500);
+  }
+}
+
+export async function handleRuntimeUpdate() {
+  try {
+    const handler = await getRuntimeHandler();
+    const result = await handler.triggerUpdate();
+    const status = result?.success ? 200 : 400;
+    return jsonResponse(result, status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown error');
+    log("error", `[server] Runtime update error: ${message}`);
+    return jsonResponse({ success: false, message: `Runtime update failed: ${message}` }, 500);
+  }
+}
+
 /**
  * 处理获取日志的请求
  * @returns {Response} 包含日志文本的响应
  */
-export function handleLogs() {
+export function handleLogs(auth = {}) {
+  const { isAdmin } = normalizeAuth(auth);
   const logText = globals.logBuffer
     .map(
       (log) =>
         `[${log.timestamp}] ${log.level}: ${formatLogMessage(log.message)}`
     )
     .join("\n");
-    
-  // 检查当前 token 是否为 admin_token
+  
+  // 非管理员访问时隐藏日志中的 IP 信息
   let processedLogText = logText;
-  if (globals.currentToken !== globals.adminToken) {
-    // 隐藏 client ip 地址，将 "client ip: 127.0.0.1" 中的 IP 地址部分替换为相同长度的 *，但保留 .
+  if (!isAdmin) {
     processedLogText = logText.replace(/(client\s+ip:\s*)([^\n\r]*)/gi, (match, prefix, ipPart) => {
-      // 将 IP 地址中的每个字符（除了 . 和空格）替换为 *
       const maskedIp = ipPart.replace(/[^.\s\n\r]/g, '*');
       return prefix + maskedIp;
     });
@@ -167,10 +239,25 @@ export async function handleClearCache() {
     globals.reqRecords = []; // 清空请求记录
     globals.todayReqNum = 0; // 重置今日请求次数
     
-    // 清理搜索和弹幕缓存
+    // 清理搜索、详情和弹幕缓存
     globals.searchCache = new Map();
     globals.commentCache = new Map();
+    globals.animeDetailsCache = new Map();
+    globals.episodeDetailsCache = new Map();
+    globals.lazyDetailDescriptors = new Map();
     globals.requestHistory = new Map();
+
+    try {
+      // 清理 Bangumi-Data 内存与磁盘缓存；若仍启用则异步重新加载，避免下一次查询冷启动过慢。
+      await clearBangumiDataCache(true);
+      if (globals.useBangumiData) {
+        initBangumiData(globals.deployPlatform, false).catch(e => {
+          log("warn", `[server] Bangumi-Data background reload failed: ${e.message}`);
+        });
+      }
+    } catch (bangumiError) {
+      log("error", `[server] Failed to clear Bangumi-Data cache: ${bangumiError.message}`);
+    }
     
     log("info", `[server] Memory cache cleared successfully`);
     
@@ -216,6 +303,9 @@ export async function handleClearCache() {
       lastSelectMap: 0,
       searchCache: 0,
       commentCache: 0,
+      animeDetailsCache: 0,
+      episodeDetailsCache: 0,
+      lazyDetailDescriptors: 0,
       requestHistory: 0,
       reqRecords: 0,
       todayReqNum: 0
@@ -230,17 +320,16 @@ export async function handleClearCache() {
  * 处理获取请求记录的请求
  * @returns {Response} 包含请求记录的响应
  */
-export function handleReqRecords() {
+export function handleReqRecords(auth = {}) {
+  const { isAdmin } = normalizeAuth(auth);
   // 返回请求记录，按时间倒序排列（最新的在前）
   let records = [...globals.reqRecords].reverse();
   const todayReqNum = globals.todayReqNum || 0;
   
-  // 检查当前 token 是否为 admin_token，如果不是则隐藏 IP 地址
-  if (globals.currentToken !== globals.adminToken) {
-    // 隐藏请求记录中的 IP 地址，将 IP 地址部分替换为相同长度的 *，但保留 .
+  // 非管理员访问时隐藏请求记录中的 IP
+  if (!isAdmin) {
     records = records.map(record => {
       if (record.clientIp) {
-        // 将 IP 地址中的每个字符（除了 .）替换为 *
         const maskedIp = record.clientIp.replace(/[^.]/g, '*');
         return { ...record, clientIp: maskedIp };
       }
@@ -251,3 +340,50 @@ export function handleReqRecords() {
   return jsonResponse({ records, todayReqNum }, 200);
 }
 
+/**
+ * 处理获取最近 animes 缓存列表的请求
+ * @returns {Response} 包含格式化后番剧、剧集与合并子源映射的 JSON 响应
+ */
+export function handleCacheAnimes() {
+  try {
+    const localAnimes = [...(globals.animes || [])].reverse();
+    const fullAnimeMap = new Map();
+
+    localAnimes.forEach(anime => {
+      if (anime?.source && anime?.animeId !== undefined && anime?.animeId !== null) {
+        fullAnimeMap.set(`${anime.source}_${anime.animeId}`, anime);
+      }
+    });
+
+    const formattedData = localAnimes
+      .filter(anime => !anime?.isHiddenChild)
+      .map(anime => {
+        const animeJson = typeof anime?.toJson === 'function' ? anime.toJson() : { ...anime };
+        const { links = [], mergedChildren = [], ...rest } = animeJson;
+
+        return {
+          ...rest,
+          episodes: rest.episodeCount || rest.episodes || 1,
+          links,
+          mergedChildren: (Array.isArray(mergedChildren) ? mergedChildren : []).map(child => {
+            const fullChild = fullAnimeMap.get(`${child.source}_${child.animeId}`);
+            const fullChildJson = typeof fullChild?.toJson === 'function' ? fullChild.toJson() : fullChild;
+            const fullLinks = Array.isArray(fullChildJson?.links) && fullChildJson.links.length > 0
+              ? fullChildJson.links
+              : (Array.isArray(child.links) ? child.links : []);
+
+            return {
+              ...child,
+              episodes: child.episodeCount || child.episodes || 1,
+              links: fullLinks
+            };
+          })
+        };
+      });
+
+    return jsonResponse({ success: true, data: formattedData }, 200);
+  } catch (error) {
+    log("error", `[server] Fetch cache animes failed: ${error.message}`);
+    return jsonResponse({ success: false, message: `获取缓存失败: ${error.message}` }, 500);
+  }
+}

@@ -2,12 +2,14 @@ import BaseSource from './base.js';
 import { globals } from '../configs/globals.js';
 import { log } from "../utils/log-util.js";
 import { httpPost, buildQueryString } from "../utils/http-util.js";
-import { convertToAsciiSum, md5 } from "../utils/codec-util.js";
+import { convertToAsciiSum } from "../utils/codec-util.js";
+import { md5 } from "../utils/crypto-util.js";
 import { hexToInt } from "../utils/danmu-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
-import { printFirst200Chars, titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { preferSeasonCandidatesIfPresent, printFirst200Chars, resolveQuerySeason, titleMatches } from "../utils/common-util.js";
 import { SegmentListResponse } from '../models/dandan-model.js';
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取埋堆堆弹幕
@@ -194,15 +196,7 @@ class MaiduiduiSource extends BaseSource {
     }
   }
 
-  /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
-   */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {
     const tmpAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
@@ -211,28 +205,14 @@ class MaiduiduiSource extends BaseSource {
       return [];
     }
 
-    // 基础标题与季度匹配过滤
-    let filteredAnimes = sourceAnimes.filter(s => titleMatches(s.name, queryTitle, querySeason));
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.name || anime.title || '');
 
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const s = extractSeasonNumberFromAnimeTitle(anime.name).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[Maiduidui] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
-    // 使用 map 和 async 时需要返回 Promise 数组，并等待所有 Promise 完成
-    const processMaiduiduiAnimes = await Promise.all(filteredAnimes.map(async (anime) => {
+    const matchedAnimes = seasonPreferredAnimes.filter(s => titleMatches(s.name, queryTitle));
+    const processedPayloads = await mapWithConcurrency(
+      matchedAnimes,
+      resolveSourceConcurrency('maiduidui', globals),
+      async (anime) => {
         try {
           const eps = await this.getEpisodes(anime.url);
           let links = [];
@@ -245,36 +225,40 @@ class MaiduiduiSource extends BaseSource {
             });
           }
 
-          if (links.length > 0) {
-            let transformedAnime = {
-              animeId: convertToAsciiSum(anime.url),
-              bangumiId: anime.url,
-              animeTitle: `${anime.name}(${anime.year})【${anime.type}】from maiduidui`,
-              type: anime.type,
-              typeDescription: anime.type,
-              imageUrl: anime.img,
-              startDate: generateValidStartDate(anime.year),
-              episodeCount: links.length,
-              rating: 0,
-              isFavorited: true,
-              source: "maiduidui",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
+          const transformedAnime = {
+            animeId: convertToAsciiSum(anime.url),
+            bangumiId: anime.url,
+            animeTitle: `${anime.name}(${anime.year})【${anime.type}】from maiduidui`,
+            type: anime.type,
+            typeDescription: anime.type,
+            imageUrl: anime.img,
+            startDate: generateValidStartDate(anime.year),
+            episodeCount: links.length,
+            rating: 0,
+            isFavorited: true,
+            source: "maiduidui",
+          };
 
-            addAnime({...transformedAnime, links: links}, detailStore);
-
-            if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
-          }
+          return { anime: transformedAnime, links };
         } catch (error) {
           log("error", `[Maiduidui] Error processing anime: ${error.message}`);
+          return null;
         }
-      })
+      }
     );
+
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      tmpAnimes.push(payload.anime);
+      addAnime({...payload.anime, links: payload.links}, detailStore);
+      if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
+    }
 
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
 
-    return processMaiduiduiAnimes;
+    return processedPayloads;
   }
 
   async getEpisodeDanmu(id) {

@@ -13,7 +13,7 @@ export default class OtherSource extends BaseSource {
 
   async getEpisodes(id) {}
 
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {}
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes) {}
 
   async getEpisodeDanmu(id) {
     try {

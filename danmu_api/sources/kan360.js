@@ -4,7 +4,8 @@ import { log } from "../utils/log-util.js";
 import { httpGet } from "../utils/http-util.js";
 import { generateValidStartDate } from "../utils/time-util.js";
 import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
-import { titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { preferSeasonCandidatesIfPresent, resolveQuerySeason, titleMatches } from "../utils/common-util.js";
+import { mapWithConcurrency, resolveSourceConcurrency } from '../utils/concurrency-util.js';
 
 // =====================
 // 获取360看源播放链接
@@ -212,15 +213,7 @@ export default class Kan360Source extends BaseSource {
 
   async getEpisodes(id) {}
 
-  /**
-   * 处理搜索结果
-   * @param {Array} sourceAnimes 原始数据
-   * @param {string} queryTitle 关键词
-   * @param {Array} curAnimes 结果池
-   * @param {Map} detailStore 详情缓存
-   * @param {number|null} querySeason 目标季度
-   */
-  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null, querySeason = null) {
+  async handleAnimes(sourceAnimes, queryTitle, curAnimes, detailStore = null) {
     const tmpAnimes = [];
 
     // 添加错误处理，确保sourceAnimes是数组
@@ -229,27 +222,14 @@ export default class Kan360Source extends BaseSource {
       return [];
     }
 
-    // 基础标题与季度匹配过滤
-    let filteredAnimes = sourceAnimes.filter(anime => titleMatches(anime.titleTxt, queryTitle, querySeason));
+    const querySeason = resolveQuerySeason(queryTitle, detailStore);
+    const seasonPreferredAnimes = preferSeasonCandidatesIfPresent(sourceAnimes, querySeason, anime => anime.title || anime.name || '');
 
-    // 提取搜索词中的明确季度信息或使用传入的季度参数
-    const resolvedQuerySeason = querySeason !== null ? querySeason : getExplicitSeasonNumber(queryTitle);
-
-    // 初始列表预过滤机制：若用户指定了季度，优先检查结果中是否已包含匹配项
-    if (resolvedQuerySeason !== null) {
-      const seasonFiltered = filteredAnimes.filter(anime => {
-        const s = extractSeasonNumberFromAnimeTitle(anime.titleTxt).season;
-        return s === resolvedQuerySeason || (resolvedQuerySeason === 1 && s === null);
-      });
-
-      // 如果已命中目标，减少详情请求量
-      if (seasonFiltered.length > 0) {
-        filteredAnimes = seasonFiltered;
-        log("info", `[360kan] 结果已命中目标季(第${resolvedQuerySeason}季)，跳过非目标季相关请求`);
-      }
-    }
-
-    const process360Animes = await Promise.all(filteredAnimes.map(async (anime) => {
+    const matchedAnimes = seasonPreferredAnimes.filter(anime => titleMatches(anime.titleTxt, queryTitle));
+    const processedPayloads = await mapWithConcurrency(
+      matchedAnimes,
+      resolveSourceConcurrency('360', globals),
+      async (anime) => {
         try {
           let links = [];
           if (anime.cat_name === "电影") {
@@ -268,17 +248,32 @@ export default class Kan360Source extends BaseSource {
             if (anime.cat_name === '电视剧') cat = 2;
             else if (anime.cat_name === '动漫') cat = 4;
 
-            // 获取总集数（若 seriesPlaylinks 为空或不存在时使用）
-            let number = null;
-
             // 尝试使用 seriesPlaylinks（常规情况）
             if (Array.isArray(anime.seriesPlaylinks) && anime.seriesPlaylinks.length > 0) {
               if (globals.vodAllowedPlatforms.includes(anime.seriesSite)) {
                 for (let i = 0; i < anime.seriesPlaylinks.length; i++) {
                   const item = anime.seriesPlaylinks[i];
+                  let epUrl = "";
+
+                  // 适配 seriesPlaylinks 列表中存在的异构数据节点
+                  // 1. 常规节点为包含 url 属性的对象结构
+                  if (item && typeof item === "object") {
+                    epUrl = item.url || "";
+                  }
+                  // 2. 特殊节点为字符串形态的关联链接
+                  // 忽略该关联链接，并从顶层 playlinks 提取当前站点的主链接进行数据映射
+                  else if (typeof item === "string") {
+                    epUrl = (anime.playlinks && anime.playlinks[anime.seriesSite])
+                              ? anime.playlinks[anime.seriesSite]
+                              : "";
+                  }
+
+                  // 过滤无有效 url 的空节点，避免生成非法格式的剧集对象
+                  if (!epUrl) continue;
+
                   links.push({
                     "name": (i + 1).toString(),
-                    "url": item.url,
+                    "url": epUrl,
                     "title": `【${anime.seriesSite}】 第${i + 1}集`
                   });
                 }
@@ -324,49 +319,58 @@ export default class Kan360Source extends BaseSource {
               }
             }
           } else if (anime.cat_name === "综艺") {
-            const zongyiLinks = await Promise.all(
-                Object.keys(anime.playlinks_year).map(async (site) => {
-                  if (globals.vodAllowedPlatforms.includes(site)) {
-                    const yearLinks = await Promise.all(
-                        anime.playlinks_year[site].map(async (year) => {
-                          return await this.get360Zongyi(anime.titleTxt, anime.id, site, year);
-                        })
-                    );
-                    return yearLinks.flat(); // 将每个年份的子链接合并到一个数组
-                  }
-                  return [];
-                })
+            const zongyiLinks = await mapWithConcurrency(
+              Object.keys(anime.playlinks_year),
+              resolveSourceConcurrency('360', globals),
+              async (site) => {
+                if (globals.vodAllowedPlatforms.includes(site)) {
+                  const yearLinks = await mapWithConcurrency(
+                    anime.playlinks_year[site],
+                    resolveSourceConcurrency('360', globals),
+                    async (year) => await this.get360Zongyi(anime.titleTxt, anime.id, site, year)
+                  );
+                  return yearLinks.flat(); // 将每个年份的子链接合并到一个数组
+                }
+                return [];
+              }
             );
             links = zongyiLinks.flat(); // 扁平化所有返回的子链接
           }
 
-          if (links.length > 0) {
-            let transformedAnime = {
-              animeId: Number(anime.id),
-              bangumiId: String(anime.id),
-              animeTitle: `${anime.titleTxt}(${anime.year})【${anime.cat_name}】from 360`,
-              type: anime.cat_name,
-              typeDescription: anime.cat_name,
-              imageUrl: anime.cover,
-              startDate: generateValidStartDate(anime.year),
-              episodeCount: links.length,
-              rating: 0,
-              isFavorited: true,
-              source: "360",
-            };
+          if (links.length === 0) return null;
 
-            tmpAnimes.push(transformedAnime);
-            addAnime({...transformedAnime, links: links}, detailStore);
-            if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
-          }
+          const transformedAnime = {
+            animeId: Number(anime.id),
+            bangumiId: String(anime.id),
+            animeTitle: `${anime.titleTxt}(${anime.year})【${anime.cat_name}】from 360`,
+            type: anime.cat_name,
+            typeDescription: anime.cat_name,
+            imageUrl: anime.cover,
+            startDate: generateValidStartDate(anime.year),
+            episodeCount: links.length,
+            rating: 0,
+            isFavorited: true,
+            source: "360",
+          };
+
+          return { anime: transformedAnime, links };
         } catch (error) {
           log("error", `[360kan] Error processing anime: ${error.message}`);
+          return null;
         }
-      }));
+      }
+    );
+
+    for (const payload of processedPayloads) {
+      if (!payload) continue;
+      tmpAnimes.push(payload.anime);
+      addAnime({...payload.anime, links: payload.links}, detailStore);
+      if (globals.animes.length > globals.MAX_ANIMES) removeEarliestAnime();
+    }
 
     this.sortAndPushAnimesByYear(tmpAnimes, curAnimes);
 
-    return process360Animes;
+    return processedPayloads;
   }
 
   async getEpisodeDanmu(id) {}

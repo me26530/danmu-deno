@@ -1,8 +1,23 @@
 {
-  "tasks": {
-    "start": "deno run --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
-    "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write=.cache main.ts",
-    "check": "deno check main.ts supabase/functions/danmu/index.ts runtime/deno-worker.ts"
+  "imports": {
+    "pako": "npm:pako@2.1.0",
+    "node-fetch": "npm:node-fetch@3.3.2",
+    "redis": "npm:redis@5.11.0",
+    "dotenv": "npm:dotenv@16.4.7",
+    "chokidar": "npm:chokidar@4.0.3",
+    "https-proxy-agent": "npm:https-proxy-agent@7.0.6",
+    "fs": "node:fs",
+    "path": "node:path",
+    "url": "node:url",
+    "crypto": "node:crypto"
   },
-  "nodeModulesDir": "auto"
+  "compilerOptions": {
+    "allowJs": true,
+    "lib": [
+      "deno.ns",
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ]
+  }
 }
