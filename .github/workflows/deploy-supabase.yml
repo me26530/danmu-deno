@@ -38,7 +38,10 @@ jobs:
         run: supabase --version
 
       - name: Prepare danmu function files
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "Preparing files for Supabase Edge Function..."
 
           mkdir -p supabase/functions/danmu/runtime
@@ -54,19 +57,85 @@ jobs:
           find supabase/functions/danmu/danmu_api -name "*.test.js" -type f -delete
 
           # Supabase Edge Function 不能访问 Docker socket。
-          # lilixu3 分支包含 Docker/Node 运行状态和在线更新模块；这些只适合 Docker/Node，
-          # 在 Supabase 打包时如果被上传/扫描，可能触发 /var/run/docker.sock 读取错误。
+          # 不删除被 import 的 runtime 文件，而是替换为安全 stub，避免 Module not found。
           if [ -d supabase/functions/danmu/danmu_api/runtime ]; then
-            rm -f supabase/functions/danmu/danmu_api/runtime/docker-*.js
-            rm -f supabase/functions/danmu/danmu_api/runtime/node-runtime-handler.js
-            rm -f supabase/functions/danmu/danmu_api/runtime/runtime-state.js
-            rm -f supabase/functions/danmu/danmu_api/runtime/json-file-cache.js
-            cat > supabase/functions/danmu/danmu_api/runtime/runtime-handler-factory.js <<'EOF'
-export async function createRuntimeHandler(globals, deployPlatform) {
-  const { CloudRuntimeHandler } = await import('./cloud-runtime-handler.js');
-  return new CloudRuntimeHandler(globals, deployPlatform || 'supabase');
-}
-EOF
+            printf '%s
+' \
+              "export async function createRuntimeHandler(globals, deployPlatform) {" \
+              "  const { CloudRuntimeHandler } = await import('./cloud-runtime-handler.js');" \
+              "  return new CloudRuntimeHandler(globals, deployPlatform || 'supabase');" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/runtime-handler-factory.js
+
+            printf '%s
+' \
+              "export class DockerRuntimeHandler {" \
+              "  constructor() {" \
+              "    throw new Error('Docker runtime is disabled on Supabase Edge Functions');" \
+              "  }" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/docker-runtime-handler.js
+
+            printf '%s
+' \
+              "export function createDockerEngineClient() {" \
+              "  throw new Error('Docker engine client is disabled on Supabase Edge Functions');" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/docker-engine-client.js
+
+            printf '%s
+' \
+              "export function parseDockerImageRef(value) {" \
+              "  return { original: String(value || ''), image: String(value || ''), tag: '', digest: '' };" \
+              "}" \
+              "export function normalizeDockerImageRef(value) {" \
+              "  return String(value || '');" \
+              "}" \
+              "export function resolveDockerImageRef(value) {" \
+              "  return String(value || '');" \
+              "}" \
+              "export function getDockerImageDisplayName(value) {" \
+              "  return String(value || '');" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/docker-image-ref.js
+
+            printf '%s
+' \
+              "export function getRuntimeState() {" \
+              "  return {};" \
+              "}" \
+              "export function setRuntimeState() {" \
+              "  return false;" \
+              "}" \
+              "export async function readRuntimeState() {" \
+              "  return {};" \
+              "}" \
+              "export async function writeRuntimeState() {" \
+              "  return false;" \
+              "}" \
+              "export async function patchRuntimeState() {" \
+              "  return {};" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/runtime-state.js
+
+            printf '%s
+' \
+              "export class NodeRuntimeHandler {" \
+              "  constructor() {" \
+              "    throw new Error('Node runtime is disabled on Supabase Edge Functions');" \
+              "  }" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/node-runtime-handler.js
+
+            printf '%s
+' \
+              "export async function readJsonFileCache() {" \
+              "  return null;" \
+              "}" \
+              "export async function writeJsonFileCache() {" \
+              "  return false;" \
+              "}" \
+              > supabase/functions/danmu/danmu_api/runtime/json-file-cache.js
           fi
 
           if [ -d config ]; then
@@ -79,8 +148,10 @@ EOF
           test -f supabase/functions/danmu/runtime/deno-worker.ts
           test -f supabase/functions/danmu/danmu_api/worker.js
           test -f supabase/functions/danmu/danmu_api/runtime/runtime-handler-factory.js
-          test ! -f supabase/functions/danmu/danmu_api/runtime/docker-engine-client.js
-          test ! -f supabase/functions/danmu/danmu_api/runtime/docker-runtime-handler.js
+          test -f supabase/functions/danmu/danmu_api/runtime/docker-engine-client.js
+          test -f supabase/functions/danmu/danmu_api/runtime/docker-runtime-handler.js
+          test -f supabase/functions/danmu/danmu_api/runtime/docker-image-ref.js
+          test -f supabase/functions/danmu/danmu_api/runtime/runtime-state.js
           test -f supabase/functions/danmu/deno.json
           test -f supabase/functions/danmu/package.json
 
@@ -88,19 +159,31 @@ EOF
           find supabase/functions/danmu -maxdepth 4 -type f | sort
 
       - name: Check Supabase secrets
+        shell: bash
         run: |
-          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
             echo "SUPABASE_ACCESS_TOKEN is empty" >&2
             exit 1
           fi
-          if [ -z "$SUPABASE_PROJECT_IDS" ]; then
+
+          if [ -z "${SUPABASE_PROJECT_IDS:-}" ]; then
             echo "SUPABASE_PROJECT_IDS is empty" >&2
             exit 1
           fi
 
       - name: Deploy danmu function to all projects
+        shell: bash
         run: |
+          set -euo pipefail
+
           for project_ref in $SUPABASE_PROJECT_IDS; do
             echo "Deploying danmu function to $project_ref"
-            supabase functions deploy danmu               --project-ref "$project_ref"               --no-verify-jwt               --use-api               --debug
+
+            supabase functions deploy danmu \
+              --project-ref "$project_ref" \
+              --no-verify-jwt \
+              --use-api \
+              --debug
           done
