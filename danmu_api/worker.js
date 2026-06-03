@@ -873,8 +873,6 @@ function isRunningOnVercel() {
 
 function detectDeployPlatform(env) {
   // Supabase Edge Functions / 普通 Deno 运行时适配。
-  // deno-worker.ts 会注入 DANMU_DEPLOY_PLATFORM=supabase；这里优先使用显式标记，
-  // 避免在 Deno 环境下被兜底误判为 cloudflare。
   if (env?.DANMU_DEPLOY_PLATFORM) {
     return env.DANMU_DEPLOY_PLATFORM;
   }

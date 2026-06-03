@@ -32,7 +32,7 @@ jobs:
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.104.0
 
       - name: Show Supabase CLI version
         run: supabase --version
@@ -49,8 +49,25 @@ jobs:
 
           rm -rf supabase/functions/danmu/danmu_api
           cp -r danmu_api supabase/functions/danmu/danmu_api
+
           # Edge Function 不需要测试文件，删除可减少部署体积，并避免无关 Node 测试依赖被扫描。
           find supabase/functions/danmu/danmu_api -name "*.test.js" -type f -delete
+
+          # Supabase Edge Function 不能访问 Docker socket。
+          # lilixu3 分支包含 Docker/Node 运行状态和在线更新模块；这些只适合 Docker/Node，
+          # 在 Supabase 打包时如果被上传/扫描，可能触发 /var/run/docker.sock 读取错误。
+          if [ -d supabase/functions/danmu/danmu_api/runtime ]; then
+            rm -f supabase/functions/danmu/danmu_api/runtime/docker-*.js
+            rm -f supabase/functions/danmu/danmu_api/runtime/node-runtime-handler.js
+            rm -f supabase/functions/danmu/danmu_api/runtime/runtime-state.js
+            rm -f supabase/functions/danmu/danmu_api/runtime/json-file-cache.js
+            cat > supabase/functions/danmu/danmu_api/runtime/runtime-handler-factory.js <<'EOF'
+export async function createRuntimeHandler(globals, deployPlatform) {
+  const { CloudRuntimeHandler } = await import('./cloud-runtime-handler.js');
+  return new CloudRuntimeHandler(globals, deployPlatform || 'supabase');
+}
+EOF
+          fi
 
           if [ -d config ]; then
             rm -rf supabase/functions/danmu/config
@@ -61,6 +78,9 @@ jobs:
           test -f supabase/functions/danmu/index.ts
           test -f supabase/functions/danmu/runtime/deno-worker.ts
           test -f supabase/functions/danmu/danmu_api/worker.js
+          test -f supabase/functions/danmu/danmu_api/runtime/runtime-handler-factory.js
+          test ! -f supabase/functions/danmu/danmu_api/runtime/docker-engine-client.js
+          test ! -f supabase/functions/danmu/danmu_api/runtime/docker-runtime-handler.js
           test -f supabase/functions/danmu/deno.json
           test -f supabase/functions/danmu/package.json
 
@@ -82,5 +102,5 @@ jobs:
         run: |
           for project_ref in $SUPABASE_PROJECT_IDS; do
             echo "Deploying danmu function to $project_ref"
-            supabase functions deploy danmu               --project-ref "$project_ref"               --no-verify-jwt               --debug
+            supabase functions deploy danmu               --project-ref "$project_ref"               --no-verify-jwt               --use-api               --debug
           done
